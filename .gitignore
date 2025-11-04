@@ -1,0 +1,99 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.conda/
+
+# PyTorch Models
+*.pth
+*.pt
+*.ckpt
+*.pkl
+*.pickle
+trained_model.pth
+trained_agent_final.pth
+checkpoints/
+models/
+saved_models/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb_checkpoints/
+Untitled*.ipynb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs and databases
+*.log
+*.sql
+*.sqlite
+*.db
+logs/
+*.out
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Grid2Op specific
+chronics_data/
+l2rpn_case14_sandbox/
+rte_case14_realistic/
+rte_case5_example/
+l2rpn_neurips_2020*/
+l2rpn_wcci_2022/
+data/
+grid2op_data/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.bak
+*.swp
+
+# Environment variables
+.env
+.env.local
+
+# Experimental results
+results/
+experiments/
+outputs/
+evaluations/
