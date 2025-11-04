@@ -1,0 +1,58 @@
+# Requirements from bdonnot/l2rpn:idf.2023.4 Docker image
+# Core Grid2Op and simulation packages
+Grid2Op==1.9.4
+LightSim2Grid==0.7.4
+l2rpn-baselines==0.8.0
+pandapower==2.13.1
+Chronix2Grid==1.2.0.post1
+
+# Machine Learning and Neural Networks  
+torch==2.0.1
+tensorflow==2.12.0
+tensorflow-probability==0.20.1
+stable-baselines3==2.0.0
+tianshou==0.5.0
+ray==2.6.1
+
+# Scientific Computing
+numpy==1.23.5
+scipy==1.10.1
+pandas==2.0.2
+scikit-learn==1.2.2
+scikit-image==0.21.0
+numba==0.57.0
+
+# Visualization
+matplotlib==3.7.1
+seaborn==0.12.2
+plotly==5.15.0
+folium==0.14.0
+
+# Jupyter and Development
+jupyter==1.0.0
+ipykernel==6.23.1
+ipython==8.14.0
+
+# Optimization and RL
+gym==0.26.2
+gymnasium==0.28.1
+cvxpy==1.3.1
+bayesian-optimization==1.4.3
+optax==0.1.5
+
+# JAX ecosystem (for advanced ML)
+jax==0.4.12
+jaxlib==0.4.12
+flax==0.6.11
+chex==0.1.7
+
+# Utilities
+tqdm==4.65.0
+click==8.1.3
+pyyaml==6.0
+requests==2.31.0
+psutil==5.9.5
+
+# Development and Testing
+pytest==7.3.2
+autopep8==2.0.2

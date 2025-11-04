@@ -1,3 +1,42 @@
+## 🚀 Quick Start
+
+### Option 1: Docker (Recommended)
+
+To run the training using Docker:
+
+```bash
+# Create grid2op data volume if it doesn't exist
+docker volume create grid2op-data
+
+# Run training
+docker run -d --name topology_training_fixed \
+  -v /home/queno/queno:/workspace \
+  -v grid2op-data:/root/data_grid2op \
+  bdonnot/l2rpn:idf.2023.4 \
+  bash -c "cd /workspace && python3 scripts/train_quick_reconnect.py > training_log_fixed.txt 2>&1"
+```
+
+### Option 2: Local Virtual Environment
+
+If you prefer to run locally:
+
+```bash
+# Create and activate virtual environment
+python3 -m venv venv
+source venv/bin/activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Download Grid2Op data (first time only)
+python3 -c "import grid2op; env = grid2op.make('l2rpn_case14_sandbox')"
+
+# Run training
+python3 scripts/train_quick_reconnect.py
+```
+
+---
+
 # TopologyAgent - Grid2Op Alpha Zero MCTS Agent
 
 Ein fortschrittlicher reinforcement learning Agent für die Grid2Op Umgebung, der AlphaZero MCTS (Monte Carlo Tree Search) mit neuronalen Netzen kombiniert, um Topologie-Operationen in Stromnetzen zu optimieren.
@@ -47,12 +86,20 @@ TopologyAgent/
 
 ### Voraussetzungen
 
+**Einfache Installation:**
+```bash
+pip install -r requirements.txt
+```
+
+**Manuelle Installation:**
 ```bash
 pip install grid2op
 pip install lightsim2grid  # Für bessere Performance
 pip install torch          # Für neuronale Netze
 pip install numpy matplotlib
 ```
+
+> **Hinweis**: Die `requirements.txt` Datei enthält alle Abhängigkeiten mit den exakten Versionen aus dem offiziellen L2RPN Docker Image.
 
 ### Agent Training
 
