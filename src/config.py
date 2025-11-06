@@ -18,7 +18,7 @@ AGENT_CONFIG = {
     
     # Safety parameters  
     'intervention_threshold': 0.98,  # Agent acts when max_rho > 98% (evaluation/normal operation)
-    'critical_threshold': 0.98,      # MCTS training when max_rho > 95% (training - balanced difficulty)
+    'critical_threshold': 0.90,      # MCTS training when max_rho > 95% (training - balanced difficulty)
     # Simple logic: Train on critical cases (95%+), act only in near-emergency (98%+)
     
     # Memory parameters
@@ -32,8 +32,9 @@ AGENT_CONFIG = {
 
     # MCTS parameters
     'mcts_simulations': 1000,  # No limit on simulations
-    'max_depth': 40,  # Limit tree depth to 10 levels
-    'puct_c': 1.0,  # REDUCED: Less exploration, more exploitation of known good actions
+    'max_depth': 20,  # Limit tree depth to 10 levels
+    'puct_c': 1.4,  # REDUCED: Less exploration, more exploitation of known good actions
+    'mcts_epsilon': 0.3,  # Epsilon-greedy for MCTS node selection: 30% random, 70% PUCT for tree width
     'temperature': 0,  # Deterministic action selection (argmax)
     't_skipped': 50,  # Number of skipped safe states to be considered recovery
     't_stopping': 20,  # No early stopping
