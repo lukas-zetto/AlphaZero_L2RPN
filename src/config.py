@@ -31,13 +31,13 @@ AGENT_CONFIG = {
     'max_training_chronics': None,  #
 
     # MCTS parameters
-    'mcts_simulations': 3000,  # No limit on simulations
+    'mcts_simulations': 3601,  # Maximum number of simulations (may stop early)
     'max_depth': 20,  # Limit tree depth to 10 levels
     'puct_c': 1.4,  # REDUCED: Less exploration, more exploitation of known good actions
-    'mcts_epsilon': 0.3,  # Epsilon-greedy for MCTS node selection: 30% random, 70% PUCT for tree width
+    'mcts_epsilon': 0.2,  # Epsilon-greedy for MCTS node selection: 30% random, 70% PUCT for tree width
     'temperature': 0,  # Deterministic action selection (argmax)
-    't_skipped': 50,  # Number of skipped safe states to be considered recovery
-    't_stopping': 20,  # No early stopping
+    't_skipped': 80,  # Number of skipped safe states to be considered recovery node
+    't_stopping': 30,  # Stop MCTS early if this many recovery nodes found (good actions exist) 
     
     # Dirichlet noise for exploration (AlphaZero technique)
     'dirichlet_alpha': 0.3,    # Standard value: generates somewhat uniform noise
@@ -68,9 +68,16 @@ AGENT_CONFIG = {
         # Action space
     'max_actions': 61,  # Number of possible actions (60 catalog actions + 1 do-nothing)
     
-        # Recovery parameters
-        'recovery_score_norm': 100.0,  # Normalization factor for recovery_score
-        # critical_threshold is defined above in Safety parameters (0.95)
+    # Recovery parameters
+    'recovery_score_norm': 100.0,  # Normalization factor for recovery_score
+    # critical_threshold is defined above in Safety parameters (0.95)
+    
+    # Line reconnection parameters
+    'auto_reconnect': True,  # Automatically try to reconnect disconnected lines after topology actions
+    'max_reconnections_per_action': 1,  # Number of lines to reconnect per MCTS action (1 = safest)
+    
+    # Topology reset parameters
+    'topology_reset_threshold': 0.75,  # Reset to reference topology when max_rho ≤ this value (0.75 = 75% load)
 
     # Grid operation parameters
     'max_redispatch': 50.0,  # MW
@@ -87,7 +94,7 @@ ACTIONS_CONFIG = {
     'type': 'catalog_bus_switch',  # Set to 'catalog_bus_switch' to activate new catalog; any other value keeps legacy behavior
     'substations': [3, 4, 5, 8],   # Default substation set (config-driven, extendable)
     'reduction': 'N1',             # One of: 'SYM', 'N0', 'N1'
-    'drop_identity': True,         # Exclude baseline layout per substation
+    'drop_identity': False,        # Include baseline layout (identity/no-op) per substation for more options
     'masking': True,               # Enable runtime masking of illegal / cooldown actions
     # Future flags (placeholders):
     'include_line_status_toggles': False,  # Hook for later extension
