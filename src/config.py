@@ -28,10 +28,10 @@ AGENT_CONFIG = {
     # Training parameters
     'target_update_frequency': 1000,  # Less frequent updates for stability
     'gamma': 0.99,  # Standard discount factor for long-term planning
-    'max_training_chronics': None,  # TESTING: Only first chronic
+    'max_training_chronics': None,  #
 
     # MCTS parameters
-    'mcts_simulations': 1000,  # No limit on simulations
+    'mcts_simulations': 3000,  # No limit on simulations
     'max_depth': 20,  # Limit tree depth to 10 levels
     'puct_c': 1.4,  # REDUCED: Less exploration, more exploitation of known good actions
     'mcts_epsilon': 0.3,  # Epsilon-greedy for MCTS node selection: 30% random, 70% PUCT for tree width
@@ -48,6 +48,8 @@ AGENT_CONFIG = {
     'neural_network_implementation': 'v1',  # Use stable implementation
     
     # Model training parameters
+    'num_cycles': 1,  # Number of times to cycle through all training chronics
+    'episodes_per_iteration': 2,  # Number of self-play episodes before training
     'training_epochs': 5,  # Multiple epochs for proper convergence
     'weight_decay': 0.0001,  # Standard L2 regularization
     'policy_weight': 1.0,  # Balanced loss weighting

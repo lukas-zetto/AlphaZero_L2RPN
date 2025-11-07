@@ -40,7 +40,15 @@ class AlphaZeroTrainerV2:
         # Training data buffer
         self.replay_buffer = deque(maxlen=config['replay_buffer_size'])
         
+        # Split chronics into 90% train / 10% test
+        total_chronics = len(env.chronics_handler.real_data.subpaths)
+        train_size = int(total_chronics * 0.9)
+        self.train_chronics = list(range(train_size))
+        self.test_chronics = list(range(train_size, total_chronics))
+        self.current_chronic_idx = 0  # Index into train_chronics list
+        
         print(f"Created neural network: input={self.input_size}, actions={self.num_actions}")
+        print(f"Chronic split: {len(self.train_chronics)} train ({self.train_chronics[0]}-{self.train_chronics[-1]}), {len(self.test_chronics)} test ({self.test_chronics[0]}-{self.test_chronics[-1]})")
     
     def get_policy_value(self, observation):
         """Get policy and value from neural network."""
@@ -62,8 +70,13 @@ class AlphaZeroTrainerV2:
         print(f"SELF-PLAY EPISODE {episode_id}")
         print(f"{'='*60}")
         
-        # Reset environment
+        # Reset environment with next training chronic (cycle through ALL training chronics)
+        chronic_id = self.train_chronics[self.current_chronic_idx % len(self.train_chronics)]
+        print(f"Using training chronic {chronic_id} ({self.current_chronic_idx + 1}/{len(self.train_chronics)} in cycle)")
+        self.env.set_id(chronic_id)
         obs = self.env.reset()
+        self.current_chronic_idx += 1
+        
         done = False
         step = 0
         episode_data = []
@@ -99,11 +112,15 @@ class AlphaZeroTrainerV2:
                 max_depth=self.config['max_depth'],
                 epsilon=epsilon,
                 verbose=False,
-                critical_threshold=critical_threshold
+                critical_threshold=critical_threshold,
+                t_skipped=self.config.get('t_skipped', 50),
+                t_stopping=self.config.get('t_stopping', 20)
             )
             
             # Print tree statistics for debugging
-            print(f"  MCTS complete: {len(root.children)} root children, max_depth={stats['max_depth']}")
+            recovery_info = f" ({stats.get('recovery_nodes', 0)} recovery nodes)" if stats.get('recovery_nodes', 0) > 0 else ""
+            early_stop_info = f" - early stopped at {stats.get('simulations_run', 0)}/{self.config['mcts_simulations']}" if stats.get('simulations_run', 0) < self.config['mcts_simulations'] else ""
+            print(f"  MCTS complete: {len(root.children)} root children, max_depth={stats['max_depth']}{recovery_info}{early_stop_info}")
             print(f"    Tree structure:")
             for d in range(min(10, stats['max_depth']+1)):  # Show up to depth 10
                 total = stats['nodes_by_depth'].get(d, 0)
@@ -111,21 +128,21 @@ class AlphaZeroTrainerV2:
                 visits = stats['visits_by_depth'].get(d, 0)
                 print(f"      Depth {d}: {total} nodes ({terminal} terminal, {visits} visits)")
             
-            # Show root visit distribution and steps_to_reach
+            # Show root visit distribution and max_reachable_steps
             if stats['root_children_visits']:
                 visits = [c['visits'] for c in stats['root_children_visits']]
                 values = [c['value'] for c in stats['root_children_visits']]
-                steps = [c['steps_to_reach'] for c in stats['root_children_visits']]
+                max_steps = [c['max_reachable_steps'] for c in stats['root_children_visits']]
                 print(f"    Root visits: max={max(visits)}, mean={sum(visits)/len(visits):.1f}, >10={sum(1 for v in visits if v > 10)}")
                 print(f"    Root Q-values: max={max(values):.3f}, min={min(values):.3f}, mean={sum(values)/len(values):.3f}")
-                print(f"    Steps to reach: max={max(steps)}, mean={sum(steps)/len(steps):.1f}")
+                print(f"    Max reachable steps: max={max(max_steps)}, mean={sum(max_steps)/len(max_steps):.1f}")
                 
-                # Show top 3 actions by steps_to_reach (most important metric now!)
-                sorted_children = sorted(stats['root_children_visits'], key=lambda x: x['steps_to_reach'], reverse=True)[:3]
-                print(f"    Top 3 actions by steps_to_reach:")
+                # Show top 3 actions by max_reachable_steps (most important metric!)
+                sorted_children = sorted(stats['root_children_visits'], key=lambda x: x['max_reachable_steps'], reverse=True)[:3]
+                print(f"    Top 3 actions by max_reachable_steps:")
                 for i, child_info in enumerate(sorted_children, 1):
                     action_idx = child_info['action_idx']
-                    print(f"      {i}. Action {action_idx}: {child_info['steps_to_reach']} steps, {child_info['visits']} visits, Q={child_info['value']:.3f}")
+                    print(f"      {i}. Action {action_idx}: max={child_info['max_reachable_steps']} steps, {child_info['visits']} visits, Q={child_info['value']:.3f}")
             
             # Get action probabilities from visit counts
             visits = np.array([root.children.get(i, MCTSNodeV2(None, None)).visit_count 
@@ -147,13 +164,20 @@ class AlphaZeroTrainerV2:
             if normalized_entropy > 0.9:
                 print(f"    ⚠️ Warning: Policy is very uniform (entropy close to max)")
             
-            # Select action using steps_to_reach (greedy, no epsilon here - epsilon only for MCTS exploration)
+            # Count terminal children for debugging
+            terminal_actions = sum(1 for child in root.children.values() if child.is_terminal)
+            if terminal_actions > 0:
+                print(f"    ⚠️ Filtered out {terminal_actions} terminal actions (immediate failures)")
+            
+            # Select action using max_reachable_steps (greedy, no epsilon here - epsilon only for MCTS exploration)
             from training.alphazero_mcts_v2 import select_action
             action_idx = select_action(root, temperature=0, epsilon=0.0)  # Greedy selection for actual action
             
             if action_idx in root.children:
-                selected_steps = root.children[action_idx].steps_to_reach
-                print(f"  ✅ Selected action {action_idx} (steps_to_reach={selected_steps}, visits={visits[action_idx]})")
+                selected_max_steps = root.children[action_idx].max_reachable_steps
+                selected_child = root.children[action_idx]
+                terminal_flag = " [TERMINAL]" if selected_child.is_terminal else ""
+                print(f"  ✅ Selected action {action_idx} (max_steps={selected_max_steps}, visits={visits[action_idx]}{terminal_flag})")
             else:
                 print(f"  ✅ Selected action {action_idx} (default/fallback)")
             
@@ -298,8 +322,7 @@ def main():
     env = grid2op.make(
         env_name,
         backend=LightSimBackend(),
-        param=params,
-        test=True
+        param=params
     )
     
     # Build action catalog from config
@@ -326,7 +349,7 @@ def main():
         'mcts_epsilon': AGENT_CONFIG['mcts_epsilon'],  # Epsilon-greedy exploration in MCTS
         
         # Training parameters
-        'episodes_per_iteration': 2,
+        'episodes_per_iteration': AGENT_CONFIG['episodes_per_iteration'],  # From config
         'max_episode_steps': 1000,  # Run full episodes (Grid2Op default is ~300-800 steps)
         'replay_buffer_size': 10000,
         'batch_size': AGENT_CONFIG['batch_size'],
@@ -354,7 +377,22 @@ def main():
     trainer = AlphaZeroTrainerV2(env, catalog, config)
     
     # Run training
-    trainer.train(num_iterations=10)
+    num_cycles = AGENT_CONFIG.get('num_cycles', 50)
+    episodes_per_iteration = AGENT_CONFIG.get('episodes_per_iteration', 2)
+    
+    # Calculate total iterations: (num_cycles * train_chronics) / episodes_per_iteration
+    num_train_chronics = len(trainer.train_chronics)
+    total_iterations = (num_cycles * num_train_chronics) // episodes_per_iteration
+    
+    print(f"Training plan:")
+    print(f"  Training chronics: {num_train_chronics}")
+    print(f"  Cycles through all chronics: {num_cycles}")
+    print(f"  Episodes per iteration: {episodes_per_iteration}")
+    print(f"  Total iterations: {total_iterations}")
+    print(f"  Total episodes: {total_iterations * episodes_per_iteration}")
+    print()
+    
+    trainer.train(num_iterations=total_iterations)
 
 
 if __name__ == "__main__":
