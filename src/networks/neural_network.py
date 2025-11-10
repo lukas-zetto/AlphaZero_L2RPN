@@ -184,7 +184,7 @@ def neural_network_forward(neural_network, obs, num_actions, mask=None):
     return policy_probs, value
 
 
-def train_neural_network(neural_network, training_examples, config):
+def train_neural_network(neural_network, training_examples, config, optimizer=None):
     """
     Train the neural network on collected MCTS examples.
     
@@ -196,6 +196,8 @@ def train_neural_network(neural_network, training_examples, config):
         List of {'state': array, 'mcts_policy': array, 'value': float} from self-play
     config : dict
         Training configuration
+    optimizer : torch.optim.Optimizer, optional
+        If provided, use this optimizer (for persistent LR decay). Otherwise create new one.
         
     Returns:
     --------
@@ -243,8 +245,9 @@ def train_neural_network(neural_network, training_examples, config):
     dataset = TensorDataset(states_tensor, policies_tensor, values_tensor)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
     
-    # Optimizer
-    optimizer = optim.Adam(neural_network.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    # Optimizer - use provided one or create new
+    if optimizer is None:
+        optimizer = optim.Adam(neural_network.parameters(), lr=learning_rate, weight_decay=weight_decay)
     
     # Training loop
     total_policy_loss = 0.0

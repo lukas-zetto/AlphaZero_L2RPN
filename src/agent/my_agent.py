@@ -93,8 +93,8 @@ class MyCustomAgent(BaseAgent):
             input_size = self.config['input_size']  # Required config value
 
             if self.catalog_ready and self.action_catalog is not None:
-                num_actions = self.action_catalog.size + 1  # Catalog actions + do-nothing
-                print(f"🔧 Using catalog-based action space with {num_actions} actions (catalog={self.action_catalog.size} + do-nothing)")
+                num_actions = self.action_catalog.size  # Catalog already includes do-nothing if configured
+                print(f"🔧 Using catalog-based action space with {num_actions} actions")
             else:
                 raise ValueError("Action catalog is required but not initialized!")
 
@@ -161,6 +161,13 @@ class MyCustomAgent(BaseAgent):
         max_rho = observation.rho.max()
         
         if not grid_state['needs_intervention']:
+            # PRIORITY 2: If grid is very safe, reset topology to reference
+            reset_threshold = self.config.get('topology_reset_threshold', 0.75)
+            if max_rho <= reset_threshold:
+                reset_action = self._reset_topology_if_modified(observation)
+                if reset_action is not None:
+                    return reset_action
+            
             # Grid is safe - do nothing
             return self.action_space()
         
@@ -256,6 +263,55 @@ class MyCustomAgent(BaseAgent):
         
         # No lines need reconnection
         return None
+    
+    def _reset_topology_if_modified(self, observation):
+        """
+        Reset topology to reference configuration if grid is safe and topology is modified.
+        
+        This helps prevent topology drift by returning to the known-good baseline
+        configuration when the grid is stable.
+        
+        Parameters:
+        -----------
+        observation : BaseObservation
+            Current grid observation
+            
+        Returns:
+        --------
+        action : Action or None
+            Reset action if topology should be reset, None otherwise
+        """
+        try:
+            from actions.topology_reset import get_reference_topology_action
+            
+            # Check each substation to see if any are modified
+            n_sub = observation.n_sub
+            modified_subs = []
+            
+            for sub_id in range(n_sub):
+                try:
+                    sub_topo = observation.state_of(substation_id=sub_id)
+                    topo_vect = sub_topo['topo_vect']
+                    
+                    # If any element is not on bus 1, substation is modified
+                    if np.any(topo_vect != 1):
+                        modified_subs.append(sub_id)
+                except:
+                    continue
+            
+            # If topology is already reference, no reset needed
+            if len(modified_subs) == 0:
+                return None
+            
+            # Create reset action
+            reset_action = get_reference_topology_action(observation, self.action_space)
+            max_rho = observation.rho.max()
+            print(f"   🔄 Grid is very safe (rho={max_rho:.3f}) - resetting topology to reference ({len(modified_subs)} modified substations)")
+            return reset_action
+            
+        except Exception as e:
+            # If topology reset fails, just return None and do nothing
+            return None
         
     def _analyze_grid_state(self, observation: BaseObservation):
         """

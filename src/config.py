@@ -11,14 +11,16 @@ AGENT_CONFIG = {
     'compare_with_baseline': True,  # Set to True to compare custom agent vs do nothing agent
     
     # Learning parameters
-    'learning_rate': 0.0003,  # Standard Adam learning rate for neural networks
+    'learning_rate': 0.0001,  # REDUCED: Lower initial learning rate for stability (was 0.0003)
+    'learning_rate_decay': 0.98,  # NEW: Decay LR by 2% per iteration
+    'min_learning_rate': 0.00001,  # NEW: Minimum learning rate floor
     'exploration_rate': 0.3,  # Balanced exploration rate
     'exploration_decay': 0.995,  # Gradual decay over training
     'min_exploration_rate': 0.05,  # Small minimum to maintain some exploration
     
     # Safety parameters  
     'intervention_threshold': 0.98,  # Agent acts when max_rho > 98% (evaluation/normal operation)
-    'critical_threshold': 0.90,      # MCTS training when max_rho > 95% (training - balanced difficulty)
+    'critical_threshold': 0.95,      # MCTS training when max_rho > 95% (training - balanced difficulty)
     # Simple logic: Train on critical cases (95%+), act only in near-emergency (98%+)
     
     # Memory parameters
@@ -31,13 +33,14 @@ AGENT_CONFIG = {
     'max_training_chronics': None,  #
 
     # MCTS parameters
-    'mcts_simulations': 3601,  # Maximum number of simulations (may stop early)
+    'mcts_simulations': 1000,  # Number of MCTS simulations per critical state
     'max_depth': 20,  # Limit tree depth to 10 levels
     'puct_c': 1.4,  # REDUCED: Less exploration, more exploitation of known good actions
     'mcts_epsilon': 0.2,  # Epsilon-greedy for MCTS node selection: 30% random, 70% PUCT for tree width
     'temperature': 0,  # Deterministic action selection (argmax)
     't_skipped': 80,  # Number of skipped safe states to be considered recovery node
-    't_stopping': 30,  # Stop MCTS early if this many recovery nodes found (good actions exist) 
+    't_stopping': 30,  # Stop MCTS early if this many recovery nodes found (good actions exist)
+    'action_prefilter_rho_increase': 0.10,  # Pre-filter actions that increase max_rho by more than this (0.10 = 10%)
     
     # Dirichlet noise for exploration (AlphaZero technique)
     'dirichlet_alpha': 0.3,    # Standard value: generates somewhat uniform noise
@@ -49,13 +52,15 @@ AGENT_CONFIG = {
     
     # Model training parameters
     'num_cycles': 1,  # Number of times to cycle through all training chronics
-    'episodes_per_iteration': 2,  # Number of self-play episodes before training
+    'episodes_per_iteration': 8,  # INCREASED: More episodes for stable gradient estimates (was 2)
     'training_epochs': 5,  # Multiple epochs for proper convergence
     'weight_decay': 0.0001,  # Standard L2 regularization
     'policy_weight': 1.0,  # Balanced loss weighting
     'value_weight': 1.0,   # Equal importance for policy and value
-    'max_steps_per_episode': None,  # Full episode length for complete scenarios
     'input_size': 83,  # Extended encoding: 60 line features + 23 bus topology bits
+    # Experience replay toggle
+    'use_replay_buffer': True,  # ENABLED: Use experience replay for stability
+    'replay_buffer_size': 100,  # NEW: Keep last 100 episodes (~800 experiences with 8 eps/iter)
         # Input encoding breakdown:
         # - Line loads (rho): 20 bits [0:20]
         # - Line status: 20 bits [20:40] 
@@ -85,7 +90,7 @@ AGENT_CONFIG = {
     'curtailment_penalty': 0.1,
     
     # Model saving
-    'model_path': 'reconnect_v2x_final_t1761740673.pth',  # Path to save/load trained model - use the latest trained model
+    'model_path': 'checkpoints/alphazero_v2_iter1.pt',  # Path to save/load trained model - use the latest trained model
 }
 
 # New actions configuration (catalog-based bus switching)
@@ -94,7 +99,8 @@ ACTIONS_CONFIG = {
     'type': 'catalog_bus_switch',  # Set to 'catalog_bus_switch' to activate new catalog; any other value keeps legacy behavior
     'substations': [3, 4, 5, 8],   # Default substation set (config-driven, extendable)
     'reduction': 'N1',             # One of: 'SYM', 'N0', 'N1'
-    'drop_identity': False,        # Include baseline layout (identity/no-op) per substation for more options
+    'drop_identity': False,        # Keep all actions for consistent NN indices (filter in MCTS instead)
+    'include_do_nothing': True,    # Include explicit do-nothing action at index 0
     'masking': True,               # Enable runtime masking of illegal / cooldown actions
     # Future flags (placeholders):
     'include_line_status_toggles': False,  # Hook for later extension
@@ -135,7 +141,7 @@ ENV_CONFIG = {
 # Training configuration
 TRAINING_CONFIG = {
     'episodes': 1000,
-    'max_steps_per_episode': 500,
+    'max_steps_per_episode': None,  # None = no limit, let episodes run to completion
     'validation_episodes': 50,
     'save_frequency': 100,  # Save model every N episodes
     'log_frequency': 10,    # Log progress every N episodes
@@ -144,7 +150,7 @@ TRAINING_CONFIG = {
 
 # Evaluation configuration
 EVAL_CONFIG = {
-    'episodes': 20,  # Use only 5 scenarios for very fast evaluation
+    'episodes': None,  # None = use all test scenarios (101 chronics)
     'max_steps': 1000,  # Reduced from 2000 for faster testing
     'metrics': [
         'survival_time',

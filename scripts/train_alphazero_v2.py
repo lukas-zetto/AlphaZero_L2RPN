@@ -26,29 +26,38 @@ class AlphaZeroTrainerV2:
         self.env = env
         self.action_catalog = action_catalog
         self.config = config
-        
+        self.use_replay_buffer = config.get('use_replay_buffer', True)
         # Create neural network
         self.input_size = 83  # From encode_observation_simple
         self.num_actions = len(action_catalog.actions)
-        
         self.neural_network = create_neural_network(
             input_size=self.input_size,
             num_actions=self.num_actions,
             config=config
         )
+        # Create optimizer once (for learning rate decay)
+        self.learning_rate = config['learning_rate']
+        self.optimizer = torch.optim.Adam(
+            self.neural_network.parameters(), 
+            lr=self.learning_rate,
+            weight_decay=config.get('weight_decay', 0.0001)
+        )
+        # Learning rate decay params
+        self.lr_decay = config.get('learning_rate_decay', 1.0)
+        self.min_lr = config.get('min_learning_rate', 0.00001)
         
-        # Training data buffer
-        self.replay_buffer = deque(maxlen=config['replay_buffer_size'])
-        
+        # Training data buffer - stores EPISODES (each episode is a list of experiences)
+        self.replay_buffer = deque(maxlen=config.get('replay_buffer_size', 100))
         # Split chronics into 90% train / 10% test
         total_chronics = len(env.chronics_handler.real_data.subpaths)
         train_size = int(total_chronics * 0.9)
         self.train_chronics = list(range(train_size))
         self.test_chronics = list(range(train_size, total_chronics))
         self.current_chronic_idx = 0  # Index into train_chronics list
-        
         print(f"Created neural network: input={self.input_size}, actions={self.num_actions}")
         print(f"Chronic split: {len(self.train_chronics)} train ({self.train_chronics[0]}-{self.train_chronics[-1]}), {len(self.test_chronics)} test ({self.test_chronics[0]}-{self.test_chronics[-1]})")
+        print(f"Initial learning rate: {self.learning_rate:.6f}, decay: {self.lr_decay}, min: {self.min_lr:.6f}")
+        print(f"Replay buffer: {'ENABLED' if self.use_replay_buffer else 'DISABLED'}, size: {config.get('replay_buffer_size', 0)} episodes")
     
     def get_policy_value(self, observation):
         """Get policy and value from neural network."""
@@ -80,6 +89,7 @@ class AlphaZeroTrainerV2:
         done = False
         step = 0
         episode_data = []
+        is_failure = False  # Track if episode ended due to failure
         
         while not done and step < self.config['max_episode_steps']:
             max_rho = np.max(obs.rho)
@@ -90,15 +100,47 @@ class AlphaZeroTrainerV2:
             
             # Only run MCTS if in critical state
             if not is_critical:
-                print(f"  ⏭️ Skipping MCTS - grid is safe, taking do-nothing action")
-                # Take do-nothing action
-                obs, reward, done, info = self.env.step(self.env.action_space())
+                # Check if we should reset topology to reference when safe
+                reset_threshold = self.config.get('topology_reset_threshold', 0.75)
+                if max_rho <= reset_threshold:
+                    from actions.topology_reset import get_reference_topology_action
+                    try:
+                        reset_action = get_reference_topology_action(obs, self.env.action_space)
+                        # Check if this is actually a reset (not do-nothing)
+                        # For now, just apply it
+                        print(f"  🔄 Grid is very safe (rho={max_rho:.3f} ≤ {reset_threshold}) - resetting to reference topology")
+                        obs, reward, done, info = self.env.step(reset_action)
+                    except Exception as e:
+                        print(f"  ⚠️ Topology reset failed: {e}, using do-nothing")
+                        obs, reward, done, info = self.env.step(self.env.action_space())
+                else:
+                    print(f"  ⏭️ Skipping MCTS - grid is safe, taking do-nothing action")
+                    # Take do-nothing action
+                    obs, reward, done, info = self.env.step(self.env.action_space())
                 step += 1
                 continue
             
             # Run MCTS with neural network (only in critical states)
             epsilon = self.config.get('mcts_epsilon', 0.0)
             critical_threshold = self.config.get('critical_threshold', 0.90)
+            
+            # COMPARISON: What would do-nothing do?
+            try:
+                do_nothing_action = self.env.action_space()
+                sim_obs, sim_reward, sim_done, sim_info = obs.simulate(do_nothing_action)
+                do_nothing_rho = sim_obs.rho.max()
+                rho_delta = do_nothing_rho - max_rho
+                if sim_done:
+                    print(f"  🚫 Do-nothing would FAIL (rho={do_nothing_rho:.3f})")
+                elif rho_delta > 0:
+                    print(f"  ⬆️ Do-nothing would increase rho: {max_rho:.3f} → {do_nothing_rho:.3f} (+{rho_delta:.3f})")
+                elif rho_delta < 0:
+                    print(f"  ⬇️ Do-nothing would decrease rho: {max_rho:.3f} → {do_nothing_rho:.3f} ({rho_delta:.3f})")
+                else:
+                    print(f"  ➡️ Do-nothing would maintain rho: {max_rho:.3f}")
+            except Exception as e:
+                print(f"  ⚠️ Could not simulate do-nothing: {e}")
+            
             print(f"  Running MCTS with {self.config['mcts_simulations']} simulations (epsilon={epsilon}, threshold={critical_threshold})...")
             
             root, stats = run_mcts(
@@ -106,15 +148,18 @@ class AlphaZeroTrainerV2:
                 observation=obs,
                 action_catalog=self.action_catalog,
                 num_simulations=self.config['mcts_simulations'],
-                c_puct=self.config['c_puct'],
+                c_puct=self.config['c_puct'],  # Fixed: use 'c_puct' not 'puct_c'
                 gamma=self.config['gamma'],
                 value_fn=lambda o: self.get_policy_value(o)[1],  # Use NN value
                 max_depth=self.config['max_depth'],
                 epsilon=epsilon,
-                verbose=False,
+                verbose=True,  # Enable to see pre-filter messages
                 critical_threshold=critical_threshold,
                 t_skipped=self.config.get('t_skipped', 50),
-                t_stopping=self.config.get('t_stopping', 20)
+                t_stopping=self.config.get('t_stopping', 20),
+                auto_reconnect=self.config.get('auto_reconnect', True),
+                max_reconnections=self.config.get('max_reconnections_per_action', 1),
+                prefilter_rho_increase=self.config.get('action_prefilter_rho_increase', 0.15)
             )
             
             # Print tree statistics for debugging
@@ -181,12 +226,14 @@ class AlphaZeroTrainerV2:
             else:
                 print(f"  ✅ Selected action {action_idx} (default/fallback)")
             
-            # Store training example (state, policy, value placeholder)
+            # Store training example with MCTS value estimate (root Q-value)
+            # This is the key AlphaZero insight: use MCTS bootstrapped value, not episode outcome
             state_vector = encode_observation_simple(obs)
+            root_value = root.value()  # Average Q-value from all MCTS simulations
             episode_data.append({
                 'state': state_vector,
                 'policy': mcts_policy,
-                'value': None,  # Will be filled with episode outcome
+                'value': root_value,  # MCTS value estimate (not episode outcome!)
             })
             
             # Get line loads before action
@@ -206,72 +253,129 @@ class AlphaZeroTrainerV2:
             if not done:
                 rho_after = obs.rho.copy()
                 top_lines_after = np.argsort(rho_after)[-3:][::-1]
+                actual_rho_change = rho_after.max() - rho_before.max()
+                
                 print(f"  📉 Line loads:")
                 print(f"    Before (top 3): " + ", ".join([f"L{i}={rho_before[i]:.2f}" for i in top_lines_before]))
                 print(f"    After  (top 3): " + ", ".join([f"L{i}={rho_after[i]:.2f}" for i in top_lines_after]))
-                max_change = np.max(np.abs(rho_after - rho_before))
-                print(f"    Max change: {max_change:.3f}")
+                print(f"    Max change: {actual_rho_change:+.3f}")
+                
+                # Compare with do-nothing
+                if 'do_nothing_rho' in locals():
+                    do_nothing_change = do_nothing_rho - rho_before.max()
+                    actual_change = rho_after.max() - rho_before.max()
+                    if actual_change < do_nothing_change:
+                        improvement = do_nothing_change - actual_change
+                        print(f"    ✅ Better than do-nothing by {improvement:.3f} (do-nothing: {do_nothing_change:+.3f}, actual: {actual_change:+.3f})")
+                    elif actual_change > do_nothing_change:
+                        worse = actual_change - do_nothing_change
+                        print(f"    ❌ WORSE than do-nothing by {worse:.3f} (do-nothing: {do_nothing_change:+.3f}, actual: {actual_change:+.3f})")
+                    else:
+                        print(f"    ➡️ Same as do-nothing ({actual_change:+.3f})")
+
             
             if done:
-                print(f"\n  ⚠️ Episode ended at step {step}")
-                print(f"    Reason: {info.get('exception', 'Unknown')}")
-                print(f"    Is illegal: {info.get('is_illegal', False)}")
-                print(f"    Is ambiguous: {info.get('is_ambiguous', False)}")
+                # Check if episode ended due to failure or natural completion
+                is_failure = (info.get('is_illegal', False) or 
+                             info.get('is_ambiguous', False) or 
+                             'exception' in info)
+                
+                if is_failure:
+                    print(f"\n  ❌ Episode FAILED at step {step}")
+                    print(f"    Reason: {info.get('exception', 'Unknown')}")
+                    print(f"    Is illegal: {info.get('is_illegal', False)}")
+                    print(f"    Is ambiguous: {info.get('is_ambiguous', False)}")
+                else:
+                    print(f"\n  ✅ Episode completed naturally at step {step}")
                 break
         
-        # Assign values to all states based on episode outcome
-        # Simple: +1 if survived, -1 if failed
-        episode_value = 1.0 if step >= self.config['max_episode_steps'] else -1.0
+        # Episode complete - MCTS values already stored per-state during self-play
+        # No need to overwrite with episode outcome! MCTS bootstrapping is more accurate
         
         print(f"\n✅ Episode Summary:")
         print(f"  Steps: {step}/{self.config['max_episode_steps']}")
         print(f"  MCTS states collected: {len(episode_data)}")
-        print(f"  Episode value: {episode_value:.1f}")
-        print(f"  Success: {'Yes' if episode_value > 0 else 'No'}")
+        print(f"  Success: {'Yes' if not is_failure else 'No'}")
         
-        for data in episode_data:
-            data['value'] = episode_value
-            self.replay_buffer.append(data)
+        if len(episode_data) > 0:
+            # Show value distribution from MCTS estimates
+            values = [data['value'] for data in episode_data]
+            print(f"  MCTS value range: [{min(values):.3f}, {max(values):.3f}], mean={np.mean(values):.3f}")
         
-        return len(episode_data), episode_value
+        # Store ENTIRE EPISODE as a unit in replay buffer
+        if self.use_replay_buffer and len(episode_data) > 0:
+            self.replay_buffer.append(episode_data)
+        
+        return len(episode_data), 1.0 if not is_failure else -1.0  # Episode outcome for logging only
     
-    def train_network(self, iteration):
-        """Train neural network on replay buffer."""
-        if len(self.replay_buffer) == 0:
-            print(f"Replay buffer is empty, skipping training")
-            return None
+    def train_network(self, iteration, current_iteration_data=None):
+        """Train neural network on replay buffer or just current iteration's data."""
+        if not self.use_replay_buffer:
+            # Train only on current iteration's data
+            if not current_iteration_data or len(current_iteration_data) == 0:
+                print(f"No current iteration data, skipping training")
+                return None
+            print(f"\n{'='*60}")
+            print(f"TRAINING NEURAL NETWORK - Iteration {iteration}")
+            print(f"{'='*60}")
+            print(f"Training on {len(current_iteration_data)} experiences (no replay buffer)")
+            training_examples = [
+                {
+                    'state': d['state'],
+                    'mcts_policy': d['policy'],
+                    'value': d['value']
+                } for d in current_iteration_data
+            ]
+        else:
+            # Train on experiences from replay buffer (episode-based)
+            if len(self.replay_buffer) == 0:
+                print(f"Replay buffer is empty, skipping training")
+                return None
+            
+            # Flatten all episodes in replay buffer to get individual experiences
+            all_experiences = []
+            for episode in self.replay_buffer:
+                all_experiences.extend(episode)
+            
+            print(f"\n{'='*60}")
+            print(f"TRAINING NEURAL NETWORK - Iteration {iteration}")
+            print(f"{'='*60}")
+            print(f"Replay buffer: {len(self.replay_buffer)} episodes, {len(all_experiences)} total experiences")
+            print(f"Current learning rate: {self.learning_rate:.6f}")
+            
+            # Use ALL experiences (will be batched inside train_neural_network)
+            training_examples = []
+            for data in all_experiences:
+                training_examples.append({
+                    'state': data['state'],
+                    'mcts_policy': data['policy'],
+                    'value': data['value']
+                })
         
-        print(f"\n{'='*60}")
-        print(f"TRAINING NEURAL NETWORK - Iteration {iteration}")
-        print(f"{'='*60}")
-        print(f"Training on {len(self.replay_buffer)} experiences")
-        
-        # Sample batch from replay buffer (or use all if smaller than batch_size)
-        batch_size = min(self.config['batch_size'], len(self.replay_buffer))
-        indices = np.random.choice(len(self.replay_buffer), batch_size, replace=False)
-        
-        training_examples = []
-        for idx in indices:
-            data = self.replay_buffer[idx]
-            training_examples.append({
-                'state': data['state'],
-                'mcts_policy': data['policy'],
-                'value': data['value']
-            })
-        
-        # Train
+        # Train using the persistent optimizer
         loss_info = train_neural_network(
             self.neural_network,
             training_examples,
-            self.config
+            self.config,
+            optimizer=self.optimizer  # Pass our persistent optimizer
         )
-        
         print(f"Training losses:")
         print(f"  Policy loss: {loss_info['policy_loss']:.4f}")
         print(f"  Value loss: {loss_info['value_loss']:.4f}")
         print(f"  Total loss: {loss_info['total_loss']:.4f}")
-        
         return loss_info
+    
+    def decay_learning_rate(self):
+        """Apply learning rate decay."""
+        old_lr = self.learning_rate
+        self.learning_rate = max(self.min_lr, self.learning_rate * self.lr_decay)
+        
+        # Update optimizer learning rate
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = self.learning_rate
+        
+        if old_lr != self.learning_rate:
+            print(f"📉 Learning rate decayed: {old_lr:.6f} → {self.learning_rate:.6f}")
     
     def train(self, num_iterations):
         """Run full AlphaZero training loop."""
@@ -289,11 +393,19 @@ class AlphaZeroTrainerV2:
             print(f"{'#'*60}")
             
             # Self-play phase
+            current_iteration_data = []
             for episode in range(self.config['episodes_per_iteration']):
-                self.self_play_episode(episode)
-            
+                episode_len, episode_value = self.self_play_episode(episode)
+                # Collect all episode data if not using replay buffer
+                if not self.use_replay_buffer:
+                    # The last episode's data is appended to replay_buffer in self_play_episode
+                    # So we can just grab it from there
+                    current_iteration_data.extend(list(self.replay_buffer)[-episode_len:])
             # Training phase
-            self.train_network(iteration)
+            self.train_network(iteration, current_iteration_data=current_iteration_data if not self.use_replay_buffer else None)
+            
+            # Decay learning rate after training
+            self.decay_learning_rate()
             
             # Save checkpoint
             if (iteration + 1) % self.config['save_every'] == 0:
@@ -330,13 +442,18 @@ def main():
     substations = ACTIONS_CONFIG['substations']
     reduction = ACTIONS_CONFIG['reduction']
     drop_identity = ACTIONS_CONFIG['drop_identity']
+    include_do_nothing = ACTIONS_CONFIG.get('include_do_nothing', True)
     
-    print(f"Building action catalog: substations={substations}, reduction={reduction}")
-    catalog = build_action_catalog(env, substations=substations, reduction=reduction, drop_identity=drop_identity)
+    print(f"Building action catalog: substations={substations}, reduction={reduction}, drop_identity={drop_identity}, include_do_nothing={include_do_nothing}")
+    catalog = build_action_catalog(env, substations=substations, reduction=reduction, 
+                                   drop_identity=drop_identity, include_do_nothing=include_do_nothing)
     print(f"Action catalog: {len(catalog.actions)} actions")
+    if include_do_nothing:
+        print(f"  Action 0: do-nothing (explicit)")
+        print(f"  Actions 1-{len(catalog.actions)-1}: topology changes")
     
     # Load training configuration from config.py
-    from config import AGENT_CONFIG
+    from config import AGENT_CONFIG, TRAINING_CONFIG
     
     config = {
         # MCTS parameters from config.py
@@ -347,18 +464,20 @@ def main():
         'temperature': AGENT_CONFIG['temperature'],
         'critical_threshold': AGENT_CONFIG['critical_threshold'],  # Only act when rho > threshold
         'mcts_epsilon': AGENT_CONFIG['mcts_epsilon'],  # Epsilon-greedy exploration in MCTS
+        'action_prefilter_rho_increase': AGENT_CONFIG.get('action_prefilter_rho_increase', 0.15),  # Pre-filter bad actions
         
         # Training parameters
         'episodes_per_iteration': AGENT_CONFIG['episodes_per_iteration'],  # From config
-        'max_episode_steps': 1000,  # Run full episodes (Grid2Op default is ~300-800 steps)
-        'replay_buffer_size': 10000,
+        'max_episode_steps': TRAINING_CONFIG.get('max_steps_per_episode', 10000) or 10000,  # From TRAINING_CONFIG, default 10000 if None
+        'replay_buffer_size': AGENT_CONFIG.get('replay_buffer_size', 100),  # From config
+        'use_replay_buffer': AGENT_CONFIG.get('use_replay_buffer', True),  # From config
         'batch_size': AGENT_CONFIG['batch_size'],
         'learning_rate': AGENT_CONFIG['learning_rate'],
         'weight_decay': AGENT_CONFIG['weight_decay'],
         'epochs_per_iteration': AGENT_CONFIG['training_epochs'],
         
         # Checkpointing
-        'save_every': 5,
+        'save_every': 1,  # Save checkpoint every iteration
         
         # Neural network architecture
         'hidden_sizes': [AGENT_CONFIG['hidden_size'], AGENT_CONFIG['hidden_size']],

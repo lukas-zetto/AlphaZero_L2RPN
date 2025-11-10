@@ -68,8 +68,15 @@ class SubstationLayoutAction:
         """Create a Grid2Op action applying this layout.
         Only set elements whose bus differs from current; we cannot know current
         here without observation, so we set all to target bus (Grid2Op will ignore if same).
+        
+        Special case: sub_id=-1 means do-nothing action.
         """
         action = action_space()
+        
+        # Handle do-nothing action
+        if self.sub_id == -1:
+            return action  # Empty action = do nothing
+        
         if self.line_or_indices:
             action.line_or_set_bus = [(idx, self.assignment[("line_or", idx)]) for idx in self.line_or_indices]
         if self.line_ex_indices:
@@ -136,7 +143,8 @@ class ActionCatalog:
 # Catalog Construction
 # =============================
 
-def build_action_catalog(env, substations: Iterable[int], reduction: str, drop_identity: bool = True) -> ActionCatalog:
+def build_action_catalog(env, substations: Iterable[int], reduction: str, drop_identity: bool = True, 
+                        include_do_nothing: bool = True) -> ActionCatalog:
     """Build the action catalog for the given substations and reduction mode.
 
     Parameters
@@ -148,6 +156,8 @@ def build_action_catalog(env, substations: Iterable[int], reduction: str, drop_i
         One of SYM, N0, N1.
     drop_identity : bool
         Whether to remove the baseline layout per substation.
+    include_do_nothing : bool
+        If True, prepend a do-nothing action at index 0.
     """
     if reduction not in VALID_REDUCTION:
         raise ValueError(f"Unknown reduction mode '{reduction}'. Valid: {VALID_REDUCTION}")
@@ -162,6 +172,21 @@ def build_action_catalog(env, substations: Iterable[int], reduction: str, drop_i
     per_sub_counts: Dict[int, int] = {}
 
     substations_sorted = sorted(set(substations))
+    
+    # Add do-nothing action at index 0 if requested
+    if include_do_nothing:
+        # Create a special do-nothing action (empty topology change)
+        do_nothing = SubstationLayoutAction(
+            sub_id=-1,  # Special marker for do-nothing
+            elements=[],
+            assignment={},
+            line_or_indices=[],
+            line_ex_indices=[],
+            gen_indices=[],
+            load_indices=[]
+        )
+        actions.append(do_nothing)
+        per_sub_counts[-1] = 1  # Track do-nothing separately
 
     for sub_id in substations_sorted:
         sub_actions = _enumerate_substation_layouts(env, sub_id, reduction, drop_identity, baseline_obs)
