@@ -64,10 +64,30 @@ def _parallel_episode_worker(args):
             include_do_nothing=ACTIONS_CONFIG.get('include_do_nothing', True)
         )
         
-        # Create neural network (load from state if provided)
+        # Create neural network and load shared weights
         input_size = 83
         num_actions = len(catalog.actions)
+        
+        # Import torch for state dict loading
+        import torch
+        
+        # Create network structure (suppress print messages in workers)
+        import os
+        # Temporarily suppress stdout for network creation
+        import sys
+        from io import StringIO
+        old_stdout = sys.stdout
+        sys.stdout = StringIO()
+        
         neural_network = create_neural_network(input_size=input_size, num_actions=num_actions, config=config)
+        
+        # Restore stdout
+        sys.stdout = old_stdout
+        
+        # Load shared network weights if provided
+        if 'network_state_dict' in config:
+            neural_network.load_state_dict(config['network_state_dict'])
+            neural_network.eval()  # Set to evaluation mode for inference
         
         # Set chronic and reset
         env.set_id(chronic_id)
@@ -619,12 +639,16 @@ class AlphaZeroTrainerV2:
         print(f"  Episodes: {num_episodes}")
         print(f"  Workers: {num_workers}")
         
+        # Create config copy with shared network weights
+        worker_config = self.config.copy()
+        worker_config['network_state_dict'] = self.neural_network.state_dict()
+        
         # Prepare worker arguments
         worker_args = []
         for episode in range(num_episodes):
             chronic_id = self.train_chronics[self.current_chronic_idx % len(self.train_chronics)]
             self.current_chronic_idx += 1
-            worker_args.append((chronic_id, episode, self.config, episode))
+            worker_args.append((chronic_id, episode, worker_config, episode))
         
         # Run parallel collection
         try:

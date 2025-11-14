@@ -62,8 +62,8 @@ AGENT_CONFIG = {
     
     # Model training parameters
     'num_cycles': 1,  # Number of times to cycle through all training chronics
-    'episodes_per_iteration': 8,  # INCREASED: More episodes for stable gradient estimates (was 2)
-    'parallel_workers': 8,  # Number of parallel workers for episode collection (0 = sequential, >0 = parallel)
+    'episodes_per_iteration': 6,  # INCREASED: More episodes for stable gradient estimates (was 2)
+    'parallel_workers': 6,  # Number of parallel workers for episode collection (0 = sequential, >0 = parallel)
     'training_epochs': 5,  # Multiple epochs for proper convergence
     'weight_decay': 0.0001,  # Standard L2 regularization
     'policy_weight': 2.0,  # Balanced loss weighting
