@@ -230,7 +230,8 @@ def expand_node(node: MCTSNodeV2, action_catalog, action_idx: int,
                 critical_threshold: float = 0.90,
                 penalty_for_failure: float = -5.0,
                 auto_reconnect: bool = True,
-                max_reconnections: int = 1) -> Optional[MCTSNodeV2]:
+                max_reconnections: int = 1,
+                prefilter_rho_increase: float = 0.20) -> Optional[MCTSNodeV2]:
     """
     Expand a new child by taking action_idx in node's environment.
     
@@ -242,6 +243,7 @@ def expand_node(node: MCTSNodeV2, action_catalog, action_idx: int,
     Args:
         auto_reconnect: If True, automatically try to reconnect disconnected lines
         max_reconnections: Maximum number of lines to reconnect per action
+        prefilter_rho_increase: Maximum allowed increase in max_rho (e.g., 0.20 = 20%)
     """
     if action_idx >= len(action_catalog.actions):
         return None
@@ -361,10 +363,34 @@ def expand_node(node: MCTSNodeV2, action_catalog, action_idx: int,
         # Use custom reward as edge reward (shaped between 0 and 1)
         edge_reward = custom_reward
         
+        # PREFILTER: Check if action increases max_rho too much
+        # This prevents catastrophic actions that significantly worsen grid state
+        parent_max_rho = node.observation.rho.max()
+        new_max_rho = obs.rho.max()
+        rho_increase = new_max_rho - parent_max_rho
+        
+        # Allow action 0 (do-nothing) to bypass prefilter
+        if action_idx != 0 and rho_increase > prefilter_rho_increase:
+            # Action increases rho too much - treat as filtered (terminal failure)
+            child = MCTSNodeV2(
+                env=None,
+                observation=None,
+                parent=node,
+                action_taken=layout_action,
+                action_idx=action_idx,
+                edge_reward=penalty_for_failure,
+                steps_to_reach=node.steps_to_reach + 1
+            )
+            child.is_terminal = True
+            try:
+                env_copy.close()
+            except:
+                pass
+            return child
+        
         # HARD TERMINAL CHECK: Extreme overloads (>200%) are immediate failures
         # This prevents MCTS from treating catastrophic actions as "acceptable"
-        max_rho = obs.rho.max()
-        if max_rho > 2.0:
+        if new_max_rho > 2.0:
             done = True
             edge_reward = penalty_for_failure
         
@@ -505,7 +531,8 @@ def run_simulation(root: MCTSNodeV2, action_catalog, c_puct: float = 1.0,
                    force_expand_root: bool = True,
                    critical_threshold: float = 0.90,
                    auto_reconnect: bool = True,
-                   max_reconnections: int = 1) -> MCTSNodeV2:
+                   max_reconnections: int = 1,
+                   prefilter_rho_increase: float = 0.20) -> MCTSNodeV2:
     """
     Run one MCTS simulation: Selection -> Expansion -> Evaluation -> Backup
     
@@ -514,6 +541,7 @@ def run_simulation(root: MCTSNodeV2, action_catalog, c_puct: float = 1.0,
         force_expand_root: If True, expand all root children before going deeper
         auto_reconnect: If True, automatically try to reconnect lines after topology actions
         max_reconnections: Maximum number of lines to reconnect per action
+        prefilter_rho_increase: Maximum allowed increase in max_rho (e.g., 0.20 = 20%)
     
     Returns the leaf node that was evaluated.
     """
@@ -558,7 +586,8 @@ def run_simulation(root: MCTSNodeV2, action_catalog, c_puct: float = 1.0,
         child = expand_node(node, action_catalog, action_idx, 
                            critical_threshold=critical_threshold,
                            auto_reconnect=auto_reconnect,
-                           max_reconnections=max_reconnections)
+                           max_reconnections=max_reconnections,
+                           prefilter_rho_increase=prefilter_rho_increase)
         if child is not None:
             node.children[action_idx] = child
             node.unexpanded_actions.remove(action_idx)
@@ -582,7 +611,8 @@ def run_mcts(env, observation, action_catalog, num_simulations: int,
              t_skipped: int = 50,
              t_stopping: int = 20,
              auto_reconnect: bool = True,
-             max_reconnections: int = 1) -> Tuple[MCTSNodeV2, Dict]:
+             max_reconnections: int = 1,
+             prefilter_rho_increase: float = 0.20) -> Tuple[MCTSNodeV2, Dict]:
     """
     Run MCTS from current state with safe state skipping.
     
@@ -610,6 +640,7 @@ def run_mcts(env, observation, action_catalog, num_simulations: int,
         t_stopping: Stop early if this many recovery nodes found
         auto_reconnect: If True, automatically try to reconnect lines after topology actions
         max_reconnections: Maximum number of lines to reconnect per action
+        prefilter_rho_increase: Maximum allowed increase in max_rho (e.g., 0.20 = 20%)
     
     Returns:
         (root_node, stats_dict)
@@ -637,7 +668,7 @@ def run_mcts(env, observation, action_catalog, num_simulations: int,
     # Run simulations
     for sim_idx in range(num_simulations):
         leaf = run_simulation(root, action_catalog, c_puct, gamma, value_fn, max_depth, epsilon, force_expand_root, 
-                             critical_threshold, auto_reconnect, max_reconnections)
+                             critical_threshold, auto_reconnect, max_reconnections, prefilter_rho_increase)
         
         # Check if leaf is a recovery node (skipped many safe states)
         # Recovery nodes indicate the action leads to long-term safety
