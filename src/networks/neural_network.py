@@ -213,7 +213,7 @@ def train_neural_network(neural_network, training_examples, config, optimizer=No
     # Training hyperparameters
     batch_size = config.get('batch_size', 32)
     learning_rate = config.get('learning_rate', 0.001)
-    epochs = config.get('training_epochs', 10)
+    epochs = config.get('training_epochs', 5)  # Use config value or default to 1
     weight_decay = config.get('weight_decay', 1e-4)
     
     # Loss balancing weights - more balanced approach
@@ -276,8 +276,23 @@ def train_neural_network(neural_network, training_examples, config, optimizer=No
             # Cross-entropy: -sum(target * log(predicted))
             policy_loss = -(batch_policies_safe * log_probs).sum(dim=1).mean()
             
-            # Value loss (MSE between actual returns and predicted values)
-            value_loss = F.mse_loss(predicted_values, batch_values)
+            # Value loss with Huber loss + clipping (PPO-style stability)
+            # Clip predicted values to prevent extreme deviations from targets
+            value_clip_range = config.get('value_clip_range', 10.0)  # Allow ±N deviation from target
+            predicted_values_clipped = torch.clamp(
+                predicted_values,
+                batch_values - value_clip_range,
+                batch_values + value_clip_range
+            )
+            
+            # Huber loss: acts like MSE for small errors, linear for large errors
+            # This prevents explosion from extreme MCTS values while still learning
+            huber_delta = config.get('huber_delta', 5.0)
+            value_loss_unclipped = F.huber_loss(predicted_values, batch_values, delta=huber_delta)
+            value_loss_clipped = F.huber_loss(predicted_values_clipped, batch_values, delta=huber_delta)
+            
+            # Take the maximum loss (conservative clipping like PPO)
+            value_loss = torch.max(value_loss_unclipped, value_loss_clipped)
             
             # Combined loss with weights from config (no additional scaling)
             total_loss = policy_weight * policy_loss + value_weight * value_loss

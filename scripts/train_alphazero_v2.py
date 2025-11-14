@@ -1,6 +1,8 @@
 """
 AlphaZero training with MCTS v2 (environment copy approach).
 Trains a neural network using self-play with MCTS search.
+
+Supports both sequential and parallel episode collection.
 """
 
 import sys
@@ -13,10 +15,204 @@ import numpy as np
 import torch
 import os
 from collections import deque
+import multiprocessing as mp
+import warnings
+import traceback
 
 from actions.action_catalog import build_action_catalog
 from training.alphazero_mcts_v2 import run_mcts, select_action, MCTSNodeV2
 from networks.neural_network import create_neural_network, encode_observation_simple, neural_network_forward, train_neural_network
+
+# Suppress warnings in parallel workers
+warnings.filterwarnings("ignore")
+
+
+def _parallel_episode_worker(args):
+    """
+    Worker function for parallel episode collection.
+    Runs in separate process - must be self-contained.
+    
+    Returns episode data in same format as self_play_episode.
+    """
+    chronic_id, episode_id, config, worker_id = args
+    
+    try:
+        # Re-import in worker process
+        import grid2op
+        from lightsim2grid import LightSimBackend
+        from grid2op.Parameters import Parameters
+        from actions.action_catalog import build_action_catalog
+        from training.alphazero_mcts_v2 import run_mcts, select_action
+        from networks.neural_network import create_neural_network, encode_observation_simple, neural_network_forward
+        
+        # Create environment
+        params = Parameters()
+        params.NO_OVERFLOW_DISCONNECTION = True
+        env = grid2op.make(
+            "l2rpn_case14_sandbox",
+            backend=LightSimBackend(),
+            param=params
+        )
+        
+        # Build action catalog
+        from config import ACTIONS_CONFIG
+        catalog = build_action_catalog(
+            env,
+            substations=ACTIONS_CONFIG['substations'],
+            reduction=ACTIONS_CONFIG['reduction'],
+            drop_identity=ACTIONS_CONFIG['drop_identity'],
+            include_do_nothing=ACTIONS_CONFIG.get('include_do_nothing', True)
+        )
+        
+        # Create neural network (load from state if provided)
+        input_size = 83
+        num_actions = len(catalog.actions)
+        neural_network = create_neural_network(input_size=input_size, num_actions=num_actions, config=config)
+        
+        # Set chronic and reset
+        env.set_id(chronic_id)
+        obs = env.reset()
+        
+        # Print worker start (will appear in log)
+        print(f"  [Worker {worker_id}] Started: Chronic {chronic_id}", flush=True)
+        
+        done = False
+        step = 0
+        episode_data = []
+        max_steps = config['max_episode_steps']
+        critical_threshold = config.get('critical_threshold', 0.90)
+        
+        # Track episode statistics
+        max_rho_seen = 0.0
+        overloaded_lines = []
+        actions_taken = []
+        critical_states_count = 0
+        
+        while not done and step < max_steps:
+            max_rho = np.max(obs.rho)
+            is_critical = max_rho > critical_threshold
+            
+            # Track max rho seen
+            if max_rho > max_rho_seen:
+                max_rho_seen = max_rho
+                # Track which lines are overloaded
+                overloaded_lines = [i for i, rho in enumerate(obs.rho) if rho > 1.0]
+            
+            if is_critical:
+                critical_states_count += 1
+                
+                # Store state before action
+                rho_before = obs.rho.copy()
+                max_rho_before = np.max(rho_before)
+                overloaded_before = [i for i, rho in enumerate(rho_before) if rho > 1.0]
+                
+                # Run MCTS
+                root, stats = run_mcts(
+                    env,
+                    obs,
+                    catalog,
+                    num_simulations=config['mcts_simulations'],
+                    c_puct=config['c_puct'],
+                    gamma=config['gamma'],
+                    max_depth=config['max_depth'],
+                    epsilon=config.get('mcts_epsilon', 0.0),
+                    value_fn=lambda o: neural_network_forward(neural_network, o, num_actions)[1],
+                    critical_threshold=critical_threshold
+                )
+                
+                # Get MCTS policy
+                visits = np.array([root.children[i].visit_count if i in root.children else 0 
+                                  for i in range(num_actions)])
+                if visits.sum() > 0:
+                    mcts_policy = visits / visits.sum()
+                else:
+                    mcts_policy = np.ones(num_actions) / num_actions
+                
+                # Select action
+                action_idx = select_action(root, temperature=0, epsilon=0.0)
+                
+                # Store training example
+                state_vector = encode_observation_simple(obs)
+                root_value = root.value()
+                episode_data.append({
+                    'state': state_vector,
+                    'policy': mcts_policy,
+                    'value': root_value,
+                })
+                
+                # Take action
+                action = catalog.actions[action_idx]
+                grid2op_action = action.apply(env.action_space)
+                obs, reward, done, info = env.step(grid2op_action)
+                step += 1
+                
+                # Track action result
+                rho_after = obs.rho.copy()
+                max_rho_after = np.max(rho_after)
+                overloaded_after = [i for i, rho in enumerate(rho_after) if rho > 1.0]
+                rho_change = max_rho_after - max_rho_before
+                
+                action_desc = catalog.actions[action_idx].description() if hasattr(catalog.actions[action_idx], 'description') else f"Action {action_idx}"
+                actions_taken.append({
+                    'step': step,
+                    'action_idx': action_idx,
+                    'action_desc': action_desc,
+                    'rho_before': max_rho_before,
+                    'rho_after': max_rho_after,
+                    'rho_change': rho_change,
+                    'overloaded_before': overloaded_before,
+                    'overloaded_after': overloaded_after
+                })
+            else:
+                # Safe state - do nothing
+                obs, reward, done, info = env.step(env.action_space())
+                step += 1
+        
+        env.close()
+        
+        # Print completion summary with statistics
+        print(f"  [Worker {worker_id}] Completed: Chronic {chronic_id}", flush=True)
+        print(f"    Steps: {step}, Critical states: {critical_states_count}, Training examples: {len(episode_data)}", flush=True)
+        print(f"    Max rho: {max_rho_seen:.3f}", flush=True)
+        if overloaded_lines:
+            print(f"    Peak overloaded lines (rho>1.0): {overloaded_lines[:5]}" + (" ..." if len(overloaded_lines) > 5 else ""), flush=True)
+        if actions_taken:
+            print(f"    Actions taken: {len(actions_taken)} topology changes", flush=True)
+            # Show first 3 and last 3 actions with detailed info
+            actions_to_show = actions_taken[:3] + ([{'separator': True}] if len(actions_taken) > 6 else []) + actions_taken[-3:] if len(actions_taken) > 6 else actions_taken
+            for action_info in actions_to_show:
+                if isinstance(action_info, dict) and action_info.get('separator'):
+                    print(f"      ... ({len(actions_taken) - 6} more actions) ...", flush=True)
+                else:
+                    a = action_info
+                    improvement = "✓" if a['rho_change'] < 0 else "✗"
+                    print(f"      Step {a['step']}: Action {a['action_idx']} {improvement} rho {a['rho_before']:.3f} → {a['rho_after']:.3f} ({a['rho_change']:+.3f})", flush=True)
+                    if a['overloaded_before'] or a['overloaded_after']:
+                        before_str = f"{len(a['overloaded_before'])} lines" if a['overloaded_before'] else "none"
+                        after_str = f"{len(a['overloaded_after'])} lines" if a['overloaded_after'] else "none"
+                        print(f"        Overloaded: {before_str} → {after_str}", flush=True)
+        
+        return {
+            'success': True,
+            'chronic_id': chronic_id,
+            'episode_id': episode_id,
+            'worker_id': worker_id,
+            'episode_data': episode_data,
+            'steps': step,
+            'error': None
+        }
+        
+    except Exception as e:
+        error_msg = f"Worker {worker_id} failed: {str(e)}\n{traceback.format_exc()}"
+        return {
+            'success': False,
+            'chronic_id': chronic_id,
+            'episode_id': episode_id,
+            'worker_id': worker_id,
+            'episode_data': [],
+            'steps': 0,
+            'error': error_msg
+        }
 
 
 class AlphaZeroTrainerV2:
@@ -155,8 +351,8 @@ class AlphaZeroTrainerV2:
                 epsilon=epsilon,
                 verbose=True,  # Enable to see pre-filter messages
                 critical_threshold=critical_threshold,
-                t_skipped=self.config.get('t_skipped', 50),
-                t_stopping=self.config.get('t_stopping', 20),
+                t_skipped=self.config.get('t_skipped', 80),  # Use config value or default
+                t_stopping=self.config.get('t_stopping', 30),  # Use config value or default
                 auto_reconnect=self.config.get('auto_reconnect', True),
                 max_reconnections=self.config.get('max_reconnections_per_action', 1),
                 prefilter_rho_increase=self.config.get('action_prefilter_rho_increase', 0.15)
@@ -226,15 +422,24 @@ class AlphaZeroTrainerV2:
             else:
                 print(f"  ✅ Selected action {action_idx} (default/fallback)")
             
-            # Store training example with MCTS value estimate (root Q-value)
-            # This is the key AlphaZero insight: use MCTS bootstrapped value, not episode outcome
+            # Store training example with either MCTS value or placeholder for binary outcome
             state_vector = encode_observation_simple(obs)
-            root_value = root.value()  # Average Q-value from all MCTS simulations
-            episode_data.append({
-                'state': state_vector,
-                'policy': mcts_policy,
-                'value': root_value,  # MCTS value estimate (not episode outcome!)
-            })
+            
+            if self.config.get('use_mcts_values', True):
+                # Use MCTS Q-values (AlphaZero approach)
+                root_value = root.value()  # Average Q-value from all MCTS simulations
+                episode_data.append({
+                    'state': state_vector,
+                    'policy': mcts_policy,
+                    'value': root_value,  # MCTS value estimate
+                })
+            else:
+                # Use binary episode outcomes (will be set after episode completes)
+                episode_data.append({
+                    'state': state_vector,
+                    'policy': mcts_policy,
+                    'value': 0.0,  # Placeholder - will be updated with episode outcome
+                })
             
             # Get line loads before action
             rho_before = obs.rho.copy()
@@ -289,21 +494,28 @@ class AlphaZeroTrainerV2:
                     print(f"\n  ✅ Episode completed naturally at step {step}")
                 break
         
-        # Episode complete - MCTS values already stored per-state during self-play
-        # No need to overwrite with episode outcome! MCTS bootstrapping is more accurate
+        # Episode complete - assign final values based on configuration
+        if not self.config.get('use_mcts_values', True) and len(episode_data) > 0:
+            # Binary episode outcome assignment: +1 for success, -1 for failure
+            episode_outcome = 1.0 if not is_failure else -1.0
+            for data in episode_data:
+                data['value'] = episode_outcome
+            print(f"  📊 Assigned binary values: {episode_outcome} to all {len(episode_data)} states")
         
         print(f"\n✅ Episode Summary:")
         print(f"  Steps: {step}/{self.config['max_episode_steps']}")
         print(f"  MCTS states collected: {len(episode_data)}")
         print(f"  Success: {'Yes' if not is_failure else 'No'}")
+        print(f"  Value assignment: {'MCTS Q-values' if self.config.get('use_mcts_values', True) else 'Binary outcomes'}")
         
         if len(episode_data) > 0:
-            # Show value distribution from MCTS estimates
+            # Show value distribution
             values = [data['value'] for data in episode_data]
-            print(f"  MCTS value range: [{min(values):.3f}, {max(values):.3f}], mean={np.mean(values):.3f}")
+            print(f"  Value range: [{min(values):.3f}, {max(values):.3f}], mean={np.mean(values):.3f}")
         
-        # Store ENTIRE EPISODE as a unit in replay buffer
-        if self.use_replay_buffer and len(episode_data) > 0:
+        # Store ENTIRE EPISODE as a unit in replay buffer (always store for collection)
+        # We'll decide whether to use it for multi-iteration training based on use_replay_buffer flag
+        if len(episode_data) > 0:
             self.replay_buffer.append(episode_data)
         
         return len(episode_data), 1.0 if not is_failure else -1.0  # Episode outcome for logging only
@@ -346,9 +558,11 @@ class AlphaZeroTrainerV2:
             # Use ALL experiences (will be batched inside train_neural_network)
             training_examples = []
             for data in all_experiences:
+                # Handle both 'policy' and 'mcts_policy' keys (parallel vs sequential)
+                policy = data.get('mcts_policy', data.get('policy'))
                 training_examples.append({
                     'state': data['state'],
-                    'mcts_policy': data['policy'],
+                    'mcts_policy': policy,
                     'value': data['value']
                 })
         
@@ -377,6 +591,89 @@ class AlphaZeroTrainerV2:
         if old_lr != self.learning_rate:
             print(f"📉 Learning rate decayed: {old_lr:.6f} → {self.learning_rate:.6f}")
     
+    def decay_temperature(self):
+        """Apply exploration temperature decay."""
+        old_temp = self.current_temperature
+        temp_decay = self.config.get('exploration_temperature_decay', 1.0)
+        min_temp = self.config.get('min_temperature', 0.0)
+        self.current_temperature = max(min_temp, self.current_temperature * temp_decay)
+        
+        if old_temp != self.current_temperature:
+            print(f"🌡️ Temperature decayed: {old_temp:.3f} → {self.current_temperature:.3f}")
+    
+    def self_play_parallel(self, num_episodes, num_workers=None):
+        """
+        Collect multiple episodes in parallel using multiprocessing.
+        
+        Args:
+            num_episodes: Number of episodes to collect
+            num_workers: Number of parallel workers (default: min(cpu_count, num_episodes))
+        
+        Returns:
+            total_collected: Total number of training examples collected
+        """
+        if num_workers is None:
+            num_workers = min(mp.cpu_count(), num_episodes)
+        
+        print(f"\n⚡ PARALLEL EPISODE COLLECTION")
+        print(f"  Episodes: {num_episodes}")
+        print(f"  Workers: {num_workers}")
+        
+        # Prepare worker arguments
+        worker_args = []
+        for episode in range(num_episodes):
+            chronic_id = self.train_chronics[self.current_chronic_idx % len(self.train_chronics)]
+            self.current_chronic_idx += 1
+            worker_args.append((chronic_id, episode, self.config, episode))
+        
+        # Run parallel collection
+        try:
+            ctx = mp.get_context('spawn')
+            with ctx.Pool(processes=num_workers) as pool:
+                results = pool.map(_parallel_episode_worker, worker_args)
+            
+            # Process results
+            total_examples = 0
+            successful = 0
+            failed = 0
+            
+            for result in results:
+                if result['success']:
+                    successful += 1
+                    episode_data = result['episode_data']
+                    
+                    # Convert to expected format and add to replay buffer
+                    formatted_data = []
+                    for data in episode_data:
+                        formatted_data.append({
+                            'state': data['state'],
+                            'mcts_policy': data['policy'],
+                            'value': data['value']
+                        })
+                    
+                    if len(formatted_data) > 0:
+                        self.replay_buffer.append(formatted_data)
+                        total_examples += len(formatted_data)
+                    
+                    print(f"  ✅ Chronic {result['chronic_id']}: {len(episode_data)} examples, {result['steps']} steps")
+                else:
+                    failed += 1
+                    print(f"  ❌ Chronic {result['chronic_id']}: FAILED")
+                    if result['error']:
+                        print(f"     Error: {result['error'][:150]}...")
+            
+            print(f"\n  Summary: {successful}/{num_episodes} successful, {total_examples} total examples")
+            return total_examples
+            
+        except Exception as e:
+            print(f"❌ Parallel collection failed: {e}")
+            print(traceback.format_exc())
+            # Fall back to sequential
+            print("⚠️ Falling back to sequential collection...")
+            for episode in range(num_episodes):
+                self.self_play_episode(episode)
+            return 0
+    
     def train(self, num_iterations):
         """Run full AlphaZero training loop."""
         print(f"\n{'='*60}")
@@ -385,6 +682,15 @@ class AlphaZeroTrainerV2:
         print(f"Iterations: {num_iterations}")
         print(f"Episodes per iteration: {self.config['episodes_per_iteration']}")
         print(f"MCTS simulations: {self.config['mcts_simulations']}")
+        
+        # Check if parallel training is enabled
+        parallel_workers = self.config.get('parallel_workers', 0)
+        use_parallel = parallel_workers > 0
+        
+        if use_parallel:
+            print(f"⚡ Parallel mode: {parallel_workers} workers")
+        else:
+            print(f"🔄 Sequential mode")
         print()
         
         for iteration in range(num_iterations):
@@ -392,20 +698,31 @@ class AlphaZeroTrainerV2:
             print(f"ITERATION {iteration + 1}/{num_iterations}")
             print(f"{'#'*60}")
             
-            # Self-play phase
+            # Self-play phase - parallel or sequential
             current_iteration_data = []
-            for episode in range(self.config['episodes_per_iteration']):
-                episode_len, episode_value = self.self_play_episode(episode)
-                # Collect all episode data if not using replay buffer
-                if not self.use_replay_buffer:
-                    # The last episode's data is appended to replay_buffer in self_play_episode
-                    # So we can just grab it from there
-                    current_iteration_data.extend(list(self.replay_buffer)[-episode_len:])
-            # Training phase
+            
+            if use_parallel:
+                # PARALLEL COLLECTION
+                self.self_play_parallel(
+                    num_episodes=self.config['episodes_per_iteration'],
+                    num_workers=parallel_workers
+                )
+            else:
+                # SEQUENTIAL COLLECTION (original behavior)  
+                for episode in range(self.config['episodes_per_iteration']):
+                    episode_len, episode_value = self.self_play_episode(episode)
+                    # Collect all episode data if not using replay buffer
+                    if not self.use_replay_buffer:
+                        # Get the last episode from replay buffer (the episode we just played)
+                        if len(self.replay_buffer) > 0:
+                            current_iteration_data.extend(self.replay_buffer[-1])  # Last episode
+            
+            # Training phase (always sequential)
             self.train_network(iteration, current_iteration_data=current_iteration_data if not self.use_replay_buffer else None)
             
-            # Decay learning rate after training
+            # Decay learning rate and temperature after training
             self.decay_learning_rate()
+            self.decay_temperature()
             
             # Save checkpoint
             if (iteration + 1) % self.config['save_every'] == 0:
@@ -465,16 +782,20 @@ def main():
         'critical_threshold': AGENT_CONFIG['critical_threshold'],  # Only act when rho > threshold
         'mcts_epsilon': AGENT_CONFIG['mcts_epsilon'],  # Epsilon-greedy exploration in MCTS
         'action_prefilter_rho_increase': AGENT_CONFIG.get('action_prefilter_rho_increase', 0.15),  # Pre-filter bad actions
-        
+        't_skipped': AGENT_CONFIG['t_skipped'],  # Recovery node threshold
+        't_stopping': AGENT_CONFIG['t_stopping'],  # Early stopping threshold
+
+
         # Training parameters
         'episodes_per_iteration': AGENT_CONFIG['episodes_per_iteration'],  # From config
+        'parallel_workers': AGENT_CONFIG.get('parallel_workers', 0),  # Number of parallel workers for episode collection
         'max_episode_steps': TRAINING_CONFIG.get('max_steps_per_episode', 10000) or 10000,  # From TRAINING_CONFIG, default 10000 if None
         'replay_buffer_size': AGENT_CONFIG.get('replay_buffer_size', 100),  # From config
         'use_replay_buffer': AGENT_CONFIG.get('use_replay_buffer', True),  # From config
         'batch_size': AGENT_CONFIG['batch_size'],
         'learning_rate': AGENT_CONFIG['learning_rate'],
         'weight_decay': AGENT_CONFIG['weight_decay'],
-        'epochs_per_iteration': AGENT_CONFIG['training_epochs'],
+        'training_epochs': AGENT_CONFIG['training_epochs'],  # Correct key name
         
         # Checkpointing
         'save_every': 1,  # Save checkpoint every iteration
@@ -515,4 +836,10 @@ def main():
 
 
 if __name__ == "__main__":
+    # Set multiprocessing start method for parallel training
+    try:
+        mp.set_start_method('spawn', force=True)
+    except RuntimeError:
+        pass  # Already set
+    
     main()
