@@ -140,16 +140,44 @@ def _parallel_episode_worker(args):
                     critical_threshold=critical_threshold
                 )
                 
-                # Get MCTS policy
-                visits = np.array([root.children[i].visit_count if i in root.children else 0 
-                                  for i in range(num_actions)])
-                if visits.sum() > 0:
-                    mcts_policy = visits / visits.sum()
-                else:
-                    mcts_policy = np.ones(num_actions) / num_actions
-                
-                # Select action
+                # Select action (based on max_reachable_steps)
                 action_idx = select_action(root, temperature=0, epsilon=0.0)
+                
+                # Get MCTS policy target based on config
+                policy_target_method = config.get('policy_target_method', 'visits')
+                policy_temperature = config.get('policy_temperature', 1.0)
+                
+                if policy_target_method == 'one_hot':
+                    # One-hot: target the selected action (which has best max_reachable_steps)
+                    mcts_policy = np.zeros(num_actions)
+                    mcts_policy[action_idx] = 1.0
+                    
+                elif policy_target_method == 'max_steps':
+                    # Distribution based on max_reachable_steps with temperature sharpening
+                    max_reachable_values = np.array([root.children[i].max_reachable_steps if i in root.children else 0 
+                                         for i in range(num_actions)])
+                    
+                    if max_reachable_values.max() > 0:
+                        # Apply temperature sharpening (lower temp = more peaked toward best action)
+                        # Shift to positive values to avoid issues with negative powers
+                        max_steps_shifted = max_reachable_values + 1  # Add 1 to avoid zero
+                        steps_powered = np.power(max_steps_shifted, 1.0/policy_temperature)
+                        mcts_policy = steps_powered / steps_powered.sum()
+                    else:
+                        # Fallback if no valid actions
+                        mcts_policy = np.zeros(num_actions)
+                        mcts_policy[action_idx] = 1.0
+                        
+                else:  # 'visits' or default
+                    # Visit distribution: traditional AlphaZero (exploration pattern)
+                    visits = np.array([root.children[i].visit_count if i in root.children else 0 
+                                      for i in range(num_actions)])
+                    if visits.sum() > 0:
+                        # Apply temperature sharpening if specified
+                        visits_powered = np.power(visits, 1.0/policy_temperature)
+                        mcts_policy = visits_powered / visits_powered.sum()
+                    else:
+                        mcts_policy = np.ones(num_actions) / num_actions
                 
                 # Store training example
                 state_vector = encode_observation_simple(obs)
@@ -198,16 +226,12 @@ def _parallel_episode_worker(args):
             print(f"    Peak overloaded lines (rho>1.0): {overloaded_lines[:5]}" + (" ..." if len(overloaded_lines) > 5 else ""), flush=True)
         if actions_taken:
             print(f"    Actions taken: {len(actions_taken)} topology changes", flush=True)
-            # Show first 3 and last 3 actions with detailed info
-            actions_to_show = actions_taken[:3] + ([{'separator': True}] if len(actions_taken) > 6 else []) + actions_taken[-3:] if len(actions_taken) > 6 else actions_taken
-            for action_info in actions_to_show:
-                if isinstance(action_info, dict) and action_info.get('separator'):
-                    print(f"      ... ({len(actions_taken) - 6} more actions) ...", flush=True)
-                else:
-                    a = action_info
-                    improvement = "✓" if a['rho_change'] < 0 else "✗"
-                    print(f"      Step {a['step']}: Action {a['action_idx']} {improvement} rho {a['rho_before']:.3f} → {a['rho_after']:.3f} ({a['rho_change']:+.3f})", flush=True)
-                    if a['overloaded_before'] or a['overloaded_after']:
+            # Show ALL actions with detailed info
+            for action_info in actions_taken:
+                a = action_info
+                improvement = "✓" if a['rho_change'] < 0 else "✗"
+                print(f"      Step {a['step']}: Action {a['action_idx']} {improvement} rho {a['rho_before']:.3f} → {a['rho_after']:.3f} ({a['rho_change']:+.3f})", flush=True)
+                if a['overloaded_before'] or a['overloaded_after']:
                         before_str = f"{len(a['overloaded_before'])} lines" if a['overloaded_before'] else "none"
                         after_str = f"{len(a['overloaded_after'])} lines" if a['overloaded_after'] else "none"
                         print(f"        Overloaded: {before_str} → {after_str}", flush=True)
@@ -261,6 +285,9 @@ class AlphaZeroTrainerV2:
         # Learning rate decay params
         self.lr_decay = config.get('learning_rate_decay', 1.0)
         self.min_lr = config.get('min_learning_rate', 0.00001)
+        
+        # Temperature for action selection
+        self.current_temperature = config.get('temperature', 1.0)
         
         # Training data buffer - stores EPISODES (each episode is a list of experiences)
         self.replay_buffer = deque(maxlen=config.get('replay_buffer_size', 100))
@@ -434,6 +461,38 @@ class AlphaZeroTrainerV2:
             from training.alphazero_mcts_v2 import select_action
             action_idx = select_action(root, temperature=0, epsilon=0.0)  # Greedy selection for actual action
             
+            # Get MCTS policy target based on config
+            policy_target_method = self.config.get('policy_target_method', 'visits')
+            policy_temperature = self.config.get('policy_temperature', 1.0)
+            
+            if policy_target_method == 'one_hot':
+                # One-hot: target the selected action (which has best max_reachable_steps)
+                mcts_policy = np.zeros(self.num_actions)
+                mcts_policy[action_idx] = 1.0
+                
+            elif policy_target_method == 'max_steps':
+                # Distribution based on max_reachable_steps with temperature sharpening
+                max_reachable_values = np.array([root.children.get(i, MCTSNodeV2(None, None)).max_reachable_steps 
+                                     for i in range(self.num_actions)])
+                
+                if max_reachable_values.max() > 0:
+                    # Apply temperature sharpening (lower temp = more peaked toward best action)
+                    # Shift to positive values to avoid issues with negative powers
+                    max_steps_shifted = max_reachable_values + 1  # Add 1 to avoid zero
+                    steps_powered = np.power(max_steps_shifted, 1.0/policy_temperature)
+                    mcts_policy = steps_powered / steps_powered.sum()
+                else:
+                    # Fallback if no valid actions
+                    mcts_policy = np.zeros(self.num_actions)
+                    mcts_policy[action_idx] = 1.0
+                    
+            else:  # 'visits' or default
+                # Visit distribution: already computed above, just apply temperature
+                if total_visits > 0:
+                    visits_powered = np.power(visits, 1.0/policy_temperature)
+                    mcts_policy = visits_powered / visits_powered.sum()
+                # else: mcts_policy already set to uniform above
+            
             if action_idx in root.children:
                 selected_max_steps = root.children[action_idx].max_reachable_steps
                 selected_child = root.children[action_idx]
@@ -593,10 +652,16 @@ class AlphaZeroTrainerV2:
             self.config,
             optimizer=self.optimizer  # Pass our persistent optimizer
         )
+        
+        # Log value statistics for debugging
+        value_targets = [ex['value'] for ex in training_examples]
+        value_min, value_max, value_mean = np.min(value_targets), np.max(value_targets), np.mean(value_targets)
+        
         print(f"Training losses:")
         print(f"  Policy loss: {loss_info['policy_loss']:.4f}")
         print(f"  Value loss: {loss_info['value_loss']:.4f}")
         print(f"  Total loss: {loss_info['total_loss']:.4f}")
+        print(f"  Value targets - min: {value_min:.3f}, max: {value_max:.3f}, mean: {value_mean:.3f}")
         return loss_info
     
     def decay_learning_rate(self):
@@ -756,6 +821,9 @@ class AlphaZeroTrainerV2:
                     'iteration': iteration + 1,
                     'model_state_dict': self.neural_network.state_dict(),
                     'replay_buffer_size': len(self.replay_buffer),
+                    'num_actions': self.num_actions,
+                    'input_size': self.input_size,
+                    'hidden_size': self.config.get('hidden_size', 256),
                 }, checkpoint_path)
                 print(f"\nCheckpoint saved: {checkpoint_path}")
         
@@ -765,6 +833,15 @@ class AlphaZeroTrainerV2:
 
 
 def main():
+    # Set random seeds for reproducibility
+    import random
+    seed = 42
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    
     # Setup environment
     env_name = "l2rpn_case14_sandbox"
     print(f"Loading environment: {env_name}")
@@ -777,6 +854,9 @@ def main():
         backend=LightSimBackend(),
         param=params
     )
+    
+    # Set Grid2Op seed for deterministic chronics
+    env.seed(seed)
     
     # Build action catalog from config
     from config import ACTIONS_CONFIG
@@ -808,6 +888,10 @@ def main():
         'action_prefilter_rho_increase': AGENT_CONFIG.get('action_prefilter_rho_increase', 0.15),  # Pre-filter bad actions
         't_skipped': AGENT_CONFIG['t_skipped'],  # Recovery node threshold
         't_stopping': AGENT_CONFIG['t_stopping'],  # Early stopping threshold
+        
+        # Policy target parameters
+        'policy_target_method': AGENT_CONFIG.get('policy_target_method', 'visits'),
+        'policy_temperature': AGENT_CONFIG.get('policy_temperature', 1.0),
 
 
         # Training parameters
@@ -818,6 +902,8 @@ def main():
         'use_replay_buffer': AGENT_CONFIG.get('use_replay_buffer', True),  # From config
         'batch_size': AGENT_CONFIG['batch_size'],
         'learning_rate': AGENT_CONFIG['learning_rate'],
+        'learning_rate_decay': AGENT_CONFIG.get('learning_rate_decay', 1.0),
+        'min_learning_rate': AGENT_CONFIG['min_learning_rate'],
         'weight_decay': AGENT_CONFIG['weight_decay'],
         'training_epochs': AGENT_CONFIG['training_epochs'],  # Correct key name
         
@@ -825,7 +911,7 @@ def main():
         'save_every': 1,  # Save checkpoint every iteration
         
         # Neural network architecture
-        'hidden_sizes': [AGENT_CONFIG['hidden_size'], AGENT_CONFIG['hidden_size']],
+        'hidden_size': AGENT_CONFIG['hidden_size'],  # Use singular to match network code
         'dropout': 0.0,
     }
     

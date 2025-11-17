@@ -351,13 +351,15 @@ def expand_node(node: MCTSNodeV2, action_catalog, action_idx: int,
         has_error = done and reward_raw <= penalty_for_failure
         
         # Calculate custom shaped reward
+        # Pass the observation we already have to avoid calling env.get_obs() on terminal states
         custom_reward = custom_reward_fn(
             action=grid2op_action,
             env=env_copy,
             has_error=has_error,
             is_done=done,
             is_illegal=is_illegal,
-            is_ambiguous=is_ambiguous
+            is_ambiguous=is_ambiguous,
+            obs=obs  # Pass the observation from step() to avoid get_obs() on terminal env
         )
         
         # Use custom reward as edge reward (shaped between 0 and 1)
@@ -510,6 +512,10 @@ def backup(node: MCTSNodeV2, value: float, gamma: float = 0.99):
     
     Also propagates max_steps_reached: the deepest steps_to_reach value 
     observed in any simulation through this node.
+    
+    IMPORTANT: Discount is applied based on actual step differences, accounting
+    for skipped safe states. If parent is at step 10 and child at step 70,
+    we apply gamma^60, not gamma^1.
     """
     discounted_value = value
     leaf_steps = node.steps_to_reach  # Remember the leaf's total steps
@@ -520,8 +526,13 @@ def backup(node: MCTSNodeV2, value: float, gamma: float = 0.99):
         # Update max_reachable_steps to be the highest steps_to_reach seen from any leaf
         node.max_reachable_steps = max(node.max_reachable_steps, leaf_steps)
         
-        # Move up tree
-        discounted_value = node.edge_reward + gamma * discounted_value
+        # Move up tree with proper discounting based on step difference
+        if node.parent is not None:
+            # Calculate how many steps separate parent from this node
+            step_diff = node.steps_to_reach - node.parent.steps_to_reach
+            # Apply discount: gamma^(step_diff)
+            discounted_value = node.edge_reward + (gamma ** step_diff) * discounted_value
+        
         node = node.parent
 
 
@@ -661,6 +672,13 @@ def run_mcts(env, observation, action_catalog, num_simulations: int,
     n_actions = len(action_catalog.actions)
     root.unexpanded_actions = list(range(n_actions))
     root.action_priors = {i: 1.0/n_actions for i in range(n_actions)}
+    
+    # Add Dirichlet noise to root priors for exploration (AlphaZero technique)
+    dirichlet_alpha = 0.3  # Controls concentration (lower = more uniform noise)
+    dirichlet_weight = 0.25  # Mix 25% noise with 75% policy
+    noise = np.random.dirichlet([dirichlet_alpha] * n_actions)
+    for i in range(n_actions):
+        root.action_priors[i] = (1 - dirichlet_weight) * root.action_priors[i] + dirichlet_weight * noise[i]
     
     # Track recovery nodes for early stopping
     recovery_node_count = 0

@@ -21,7 +21,7 @@ class MyCustomReward(BaseReward):
     def __init__(self, logger=None):
         super().__init__(logger=logger)
         
-    def __call__(self, action, env, has_error, is_done, is_illegal, is_ambiguous):
+    def __call__(self, action, env, has_error, is_done, is_illegal, is_ambiguous, obs=None):
         """
         Compute the shaped reward based on line loads and offline lines.
         
@@ -39,6 +39,8 @@ class MyCustomReward(BaseReward):
             Whether the action was illegal
         is_ambiguous : bool
             Whether the action was ambiguous
+        obs : Observation, optional
+            Current observation. If provided, uses this instead of calling env.get_obs()
             
         Returns:
         --------
@@ -50,8 +52,9 @@ class MyCustomReward(BaseReward):
         if has_error or is_illegal:
             return 0.0
             
-        # Get current observation
-        obs = env.get_obs()
+        # Get current observation (use provided obs if available, otherwise get from env)
+        if obs is None:
+            obs = env.get_obs()
         
         # Calculate the coefficient u based on line loads
         u = self._calculate_u_coefficient(obs)
