@@ -168,6 +168,20 @@ def _parallel_episode_worker(args):
                         mcts_policy = np.zeros(num_actions)
                         mcts_policy[action_idx] = 1.0
                         
+                elif policy_target_method == 'visits_with_selection_bias':
+                    # Visit distribution with extra weight on selected action
+                    visits = np.array([root.children[i].visit_count if i in root.children else 0 
+                                      for i in range(num_actions)])
+                    if visits.sum() > 0:
+                        visits_powered = np.power(visits, 1.0/policy_temperature)
+                        # Add selection bias: boost the actually selected action (but not action 0 - do-nothing)
+                        if action_idx != 0:
+                            selection_bias = config.get('selection_bias_weight', 0.5)
+                            visits_powered[action_idx] *= (1.0 + selection_bias)
+                        mcts_policy = visits_powered / visits_powered.sum()
+                    else:
+                        mcts_policy = np.ones(num_actions) / num_actions
+                        
                 else:  # 'visits' or default
                     # Visit distribution: traditional AlphaZero (exploration pattern)
                     visits = np.array([root.children[i].visit_count if i in root.children else 0 
@@ -486,6 +500,18 @@ class AlphaZeroTrainerV2:
                     mcts_policy = np.zeros(self.num_actions)
                     mcts_policy[action_idx] = 1.0
                     
+            elif policy_target_method == 'visits_with_selection_bias':
+                # Visit distribution with extra weight on selected action
+                if total_visits > 0:
+                    visits_powered = np.power(visits, 1.0/policy_temperature)
+                    # Add selection bias: boost the actually selected action (but not action 0 - do-nothing)
+                    if action_idx != 0:
+                        selection_bias = self.config.get('selection_bias_weight', 0.5)
+                        visits_powered[action_idx] *= (1.0 + selection_bias)
+                    mcts_policy = visits_powered / visits_powered.sum()
+                else:
+                    mcts_policy = np.ones(self.num_actions) / self.num_actions
+                    
             else:  # 'visits' or default
                 # Visit distribution: already computed above, just apply temperature
                 if total_visits > 0:
@@ -674,7 +700,9 @@ class AlphaZeroTrainerV2:
             param_group['lr'] = self.learning_rate
         
         if old_lr != self.learning_rate:
-            print(f"📉 Learning rate decayed: {old_lr:.6f} → {self.learning_rate:.6f}")
+            print(f"📉 Learning rate decayed: {old_lr:.9f} → {self.learning_rate:.9f}")
+        else:
+            print(f"📉 Learning rate at minimum: {self.learning_rate:.9f}")
     
     def decay_temperature(self):
         """Apply exploration temperature decay."""

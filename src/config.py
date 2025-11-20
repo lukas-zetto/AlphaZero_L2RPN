@@ -11,18 +11,18 @@ AGENT_CONFIG = {
     'compare_with_baseline': True,  # Set to True to compare custom agent vs do nothing agent
     
     # Learning parameters
-    'learning_rate': 0.00001,  # 
-    'learning_rate_decay': 0.95,  # Decay LR by 5% per iteration  
+    'learning_rate': 0.0001,  # 
+    'learning_rate_decay': 0.98,  # Decay LR by 10% per iteration  
     'min_learning_rate': 0.00000001,  # Minimum learning rate floor
-    'exploration_rate': 0.3,  # Balanced exploration rate
+    'exploration_rate': 0.0,  # Lower exploration - policy already learned good actions
     'exploration_decay': 0.995,  # Gradual decay over training
-    'min_exploration_rate': 0.05,  # Small minimum to maintain some exploration
+    'min_exploration_rate': 0.00,  # Small minimum to maintain some exploration
     
     # Model checkpoint path for evaluation
-    'model_path': 'checkpoints copy 2/alphazero_v2_iter15.pt',
+    'model_path': 'checkpoints copy 2/alphazero_v2_iter5.pt',
     
     # Safety parameters  
-    'intervention_threshold': 0.95,  # Agent acts when max_rho > 95% (evaluation - match training threshold)
+    'intervention_threshold': 0.98,  # Agent acts when max_rho > 95% (evaluation - match training threshold)
     'critical_threshold': 0.95,      # MCTS training when max_rho > 95% (training - balanced difficulty)
     # Simple logic: Act whenever rho > 95% to match training behavior
     
@@ -36,7 +36,7 @@ AGENT_CONFIG = {
     
     # Value loss stability parameters (PPO-style)
     'value_clip_range': 20.0,  # Clip value predictions to ±10 from target
-    'huber_delta': None,  # None = use MSE, set to float for Huber loss
+    'huber_delta': None,  # Huber loss delta for value head - reduces sensitivity to outliers
     'max_training_chronics': None,  #
     
     # Value assignment method
@@ -45,37 +45,38 @@ AGENT_CONFIG = {
     # MCTS parameters
     'mcts_simulations': 1000,  # Number of MCTS simulations per critical state
     'max_depth': 20,  # Limit tree depth to 10 levels
-    'puct_c': 0.8,  # INCREASED: More exploration, less exploitation for diversity
-    'mcts_epsilon': 0.0,  # INCREASED: More random exploration during MCTS
-    'temperature': 0.5,  # INCREASED: Much more stochastic action selection for exploration (0=deterministic, 1=uniform)
-    't_skipped': 60,  # Number of skipped safe states to be considered recovery node
-    't_stopping': 25,  # Stop MCTS early if this many recovery nodes found (good actions exist)
-    'action_prefilter_rho_increase': 0.15,  # RELAXED: Allow more actions (was 0.10)
+    'puct_c': 2.0,  # Standard AlphaZero exploration constant
+    'mcts_epsilon': 0.0,  # No random exploration during MCTS (Dirichlet handles root)
+    'temperature': 1,  # More deterministic action selection during training (was 0.8)
+    't_skipped': 50,  # Number of skipped safe states to be considered recovery node
+    't_stopping': 20,  # Stop MCTS early if this many recovery nodes found (good actions exist)
+    'action_prefilter_rho_increase': 0.25,  # RELAXED: Allow more actions (was 0.10)
     
     # Policy target method
-    'policy_target_method': 'max_steps',  # 'one_hot' = one-hot on selected action, 'visits' = visit count distribution, 'max_steps' = distribution based on max_reachable_steps
-    'policy_temperature': 0.3,  # Temperature for sharpening policy distribution (lower = more bias toward selected action, 0.1 = very peaked)
+    'policy_target_method': 'visits_with_selection_bias',  # 'one_hot' = one-hot on selected action, 'visits' = visit count distribution, 'max_steps' = distribution based on max_reachable_steps, 'visits_with_selection_bias' = visits + boost selected action
+    'policy_temperature': 1.0,  # Temperature for policy distribution (1.0 = no sharpening, just raw visit counts)
+    'selection_bias_weight': 0.3,  # Extra weight multiplier for selected action (e.g., 0.5 = 50% boost)
     
     # Dirichlet noise for exploration (AlphaZero technique)
     'dirichlet_alpha': 0.3,    # Standard value: generates somewhat uniform noise
-    'dirichlet_epsilon': 0.00,  # REDUCED: 95% network policy + 5% noise for more deterministic behavior
+    'dirichlet_epsilon': 0.20,  # 75% network policy + 25% noise for exploration diversity
 
     # Neural network parameters
     'hidden_size': 128,  # Smaller network to reduce overfitting
     'neural_network_implementation': 'v1',  # Use stable implementation
     
     # Model training parameters
-    'num_cycles': 1,  # Number of times to cycle through all training chronics
+    'num_cycles': 3,  # Number of times to cycle through all training chronics
     'episodes_per_iteration': 6,  # INCREASED: More episodes for stable gradient estimates (was 2)
     'parallel_workers': 6,  # Number of parallel workers for episode collection (0 = sequential, >0 = parallel)
-    'training_epochs': 5,  # Multiple epochs for proper convergence
+    'training_epochs': 10,  # Multiple epochs for proper convergence
     'weight_decay': 0.0001,  # Standard L2 regularization
-    'policy_weight': 2.0,  # Balanced loss weighting
+    'policy_weight': 1.2,  # Balanced loss weighting
     'value_weight': 1.0,   # Equal importance for policy and value
     'input_size': 83,  # Extended encoding: 60 line features + 23 bus topology bits
     # Experience replay toggle
-    'use_replay_buffer': True,  # ENABLED: Use experience replay for stability
-    'replay_buffer_size': 15,  # NEW: Keep last 100 episodes (~800 experiences with 8 eps/iter)
+    'use_replay_buffer': True,  # Re-enabled with size 1 to avoid training skip bug
+    'replay_buffer_size': 100,  # 60 episodes = 10 iterations (6 episodes/iteration)
         # Input encoding breakdown:
         # - Line loads (rho): 20 bits [0:20]
         # - Line status: 20 bits [20:40] 
@@ -105,7 +106,7 @@ AGENT_CONFIG = {
     'curtailment_penalty': 0.1,
     
     # Model saving
-    'model_path': 'checkpoints copy 2/alphazero_v2_iter15.pt',  # Path to save/load trained model - use the latest trained model
+    'model_path': 'checkpoints copy 2/alphazero_v2_iter5.pt',  # Path to save/load trained model - use the latest trained model
 }
 
 # New actions configuration (catalog-based bus switching)
