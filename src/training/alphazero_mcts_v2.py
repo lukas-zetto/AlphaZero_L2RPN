@@ -623,7 +623,9 @@ def run_mcts(env, observation, action_catalog, num_simulations: int,
              t_stopping: int = 20,
              auto_reconnect: bool = True,
              max_reconnections: int = 1,
-             prefilter_rho_increase: float = 0.20) -> Tuple[MCTSNodeV2, Dict]:
+             prefilter_rho_increase: float = 0.20,
+             dirichlet_alpha: float = 0.3,
+             dirichlet_epsilon: float = 0.25) -> Tuple[MCTSNodeV2, Dict]:
     """
     Run MCTS from current state with safe state skipping.
     
@@ -674,11 +676,11 @@ def run_mcts(env, observation, action_catalog, num_simulations: int,
     root.action_priors = {i: 1.0/n_actions for i in range(n_actions)}
     
     # Add Dirichlet noise to root priors for exploration (AlphaZero technique)
-    dirichlet_alpha = 0.3  # Controls concentration (lower = more uniform noise)
-    dirichlet_weight = 0.25  # Mix 25% noise with 75% policy
+    # dirichlet_alpha controls concentration (lower = more uniform noise)
+    # dirichlet_epsilon controls mixing weight (higher = more exploration)
     noise = np.random.dirichlet([dirichlet_alpha] * n_actions)
     for i in range(n_actions):
-        root.action_priors[i] = (1 - dirichlet_weight) * root.action_priors[i] + dirichlet_weight * noise[i]
+        root.action_priors[i] = (1 - dirichlet_epsilon) * root.action_priors[i] + dirichlet_epsilon * noise[i]
     
     # Track recovery nodes for early stopping
     recovery_node_count = 0
@@ -791,26 +793,19 @@ def collect_tree_stats(root: MCTSNodeV2) -> Dict:
 
 def select_action(root: MCTSNodeV2, temperature: float = 1.0, epsilon: float = 0.0) -> int:
     """
-    Select action based on max steps_to_reach (how long action keeps grid safe).
+    Select action based on visit counts with temperature-based sampling.
     
-    Selection criteria (in order):
-    1. Max steps_to_reach (primary: which action keeps grid safe longest)
-    2. Max visit count (secondary: MCTS confidence/consensus - most reliable)
-    3. Max Q-value (tertiary: expected value when visits tied)
-    
-    With probability epsilon: Select random action instead
+    Selection modes:
+    - temperature = 0: Greedy (select action with max visits deterministically)
+    - temperature > 0: Sample from visit distribution with temperature
+      Higher temp = more random, lower temp = more deterministic
+    - epsilon > 0: Random action with probability epsilon
     
     CRITICAL: Filters out terminal nodes (immediate failures) to prevent catastrophic actions
     
-    Rationale for visits > Q-value:
-    - High visits = MCTS consensus this action is promising (via UCB selection)
-    - Q-value with low visits is noisy/unreliable
-    - Q-value with high visits correlates with visits anyway
-    - Visit count is more robust to statistical noise
-    
     Args:
         root: Root MCTS node
-        temperature: Unused (kept for compatibility) 
+        temperature: Controls randomness (0=greedy, higher=more random)
         epsilon: Probability of random action selection
     
     Returns:
@@ -843,37 +838,20 @@ def select_action(root: MCTSNodeV2, temperature: float = 1.0, epsilon: float = 0
     if np.random.random() < epsilon:
         return np.random.choice(actions)
     
-    # Otherwise, select action with max_reachable_steps (best path from this action),
-    # using visits and Q-value as tiebreakers
-    best_action = None
-    best_max_steps = -float('inf')
-    best_visits = -1
-    best_qvalue = -float('inf')
+    # Get visit counts for all non-terminal actions
+    visits = np.array([non_terminal_actions[a].visit_count for a in actions])
     
-    for action_idx in actions:
-        child = non_terminal_actions[action_idx]
-        max_steps = child.max_reachable_steps  # Best path through this action
-        visits = child.visit_count
-        qvalue = child.value()
-        
-        # Compare: max_reachable_steps (primary) > visits (secondary) > qvalue (tertiary)
-        is_better = False
-        if max_steps > best_max_steps:
-            is_better = True
-        elif max_steps == best_max_steps:
-            if visits > best_visits:
-                is_better = True
-            elif visits == best_visits:
-                if qvalue > best_qvalue:
-                    is_better = True
-        
-        if is_better:
-            best_action = action_idx
-            best_max_steps = max_steps
-            best_visits = visits
-            best_qvalue = qvalue
-    
-    return best_action
+    # Temperature-based selection
+    if temperature == 0 or visits.sum() == 0:
+        # Greedy: select action with most visits
+        best_idx = np.argmax(visits)
+        return actions[best_idx]
+    else:
+        # Sample from visit distribution with temperature
+        # Higher temperature = more uniform, lower = more peaked
+        visits_temp = np.power(visits, 1.0 / temperature)
+        probs = visits_temp / visits_temp.sum()
+        return np.random.choice(actions, p=probs)
 
 
 def print_tree_stats(stats: Dict, action_catalog):

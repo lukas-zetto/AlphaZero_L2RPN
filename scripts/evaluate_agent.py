@@ -53,6 +53,7 @@ def evaluate_on_scenarios(env, agent, scenarios=None, max_episodes=None):
     print(f"Evaluating on {len(scenarios)} scenarios...")
     
     results = []
+    action_counts = {}  # Track action frequency
     
     for i, scenario_id in enumerate(scenarios):
         print(f"\rScenario {i+1}/{len(scenarios)}: {scenario_id}", end='', flush=True)
@@ -85,6 +86,11 @@ def evaluate_on_scenarios(env, agent, scenarios=None, max_episodes=None):
                 episode_data['total_reward'] += reward
                 step += 1
                 
+                # Track action taken (if agent has last_action attribute)
+                if hasattr(agent, 'last_action_taken') and agent.last_action_taken is not None:
+                    action_id = agent.last_action_taken
+                    action_counts[action_id] = action_counts.get(action_id, 0) + 1
+                
             except Exception as e:
                 print(f"\nError in scenario {scenario_id}, step {step}: {e}")
                 break
@@ -96,6 +102,31 @@ def evaluate_on_scenarios(env, agent, scenarios=None, max_episodes=None):
         results.append(episode_data)
     
     print()  # New line after progress
+    
+    # DEBUG: Check action_counts state
+    print(f"DEBUG: action_counts has {len(action_counts)} unique actions, total {sum(action_counts.values())} actions")
+    
+    # Print action distribution summary
+    if action_counts:
+        print(f"\n{'='*60}")
+        print("ACTION DISTRIBUTION")
+        print(f"{'='*60}")
+        total_actions = sum(action_counts.values())
+        sorted_actions = sorted(action_counts.items(), key=lambda x: x[1], reverse=True)
+        
+        print(f"Total actions taken: {total_actions}")
+        print(f"Unique actions used: {len(action_counts)}")
+        print(f"\nTop actions:")
+        for action_id, count in sorted_actions[:10]:
+            percentage = (count / total_actions) * 100
+            print(f"  Action {action_id}: {count} times ({percentage:.1f}%)")
+        
+        if len(sorted_actions) > 10:
+            remaining_count = sum(count for _, count in sorted_actions[10:])
+            remaining_pct = (remaining_count / total_actions) * 100
+            print(f"  ... {len(sorted_actions) - 10} other actions: {remaining_count} times ({remaining_pct:.1f}%)")
+        print()
+    
     return results
 
 
@@ -232,6 +263,7 @@ def compare_agents(env, scenarios=None, max_episodes=None):
     
     custom_results = []
     do_nothing_results = []
+    action_counts = {}  # Track custom agent action frequency
     
     for i, scenario_id in enumerate(scenarios):
         print(f"\rScenario {i+1}/{len(scenarios)}: {scenario_id}", end='', flush=True)
@@ -258,6 +290,11 @@ def compare_agents(env, scenarios=None, max_episodes=None):
                 obs, reward, done, info = env.step(action)
                 custom_episode['total_reward'] += reward
                 step += 1
+                
+                # Track action taken
+                if hasattr(custom_agent, 'last_action_taken') and custom_agent.last_action_taken is not None:
+                    action_id = custom_agent.last_action_taken
+                    action_counts[action_id] = action_counts.get(action_id, 0) + 1
             except Exception as e:
                 break
         
@@ -293,6 +330,29 @@ def compare_agents(env, scenarios=None, max_episodes=None):
         do_nothing_results.append(do_nothing_episode)
     
     print()  # New line after progress
+    
+    # Print action distribution summary for custom agent
+    if action_counts:
+        print(f"\n{'='*60}")
+        print("CUSTOM AGENT - ACTION DISTRIBUTION")
+        print(f"{'='*60}")
+        total_actions = sum(action_counts.values())
+        sorted_actions = sorted(action_counts.items(), key=lambda x: x[1], reverse=True)
+        
+        print(f"Total actions taken: {total_actions}")
+        print(f"Unique actions used: {len(action_counts)}")
+        print(f"\nTop actions:")
+        for action_id, count in sorted_actions[:10]:
+            percentage = (count / total_actions) * 100
+            print(f"  Action {action_id}: {count} times ({percentage:.1f}%)")
+        
+        if len(sorted_actions) > 10:
+            remaining_count = sum(count for _, count in sorted_actions[10:])
+            remaining_pct = (remaining_count / total_actions) * 100
+            print(f"  ... {len(sorted_actions) - 10} other actions: {remaining_count} times ({remaining_pct:.1f}%)")
+        print()
+    else:
+        print("\n⚠️ No actions tracked (all do-nothing or tracking failed)\n")
     
     return custom_results, do_nothing_results
 

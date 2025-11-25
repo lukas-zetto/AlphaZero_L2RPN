@@ -11,19 +11,16 @@ AGENT_CONFIG = {
     'compare_with_baseline': True,  # Set to True to compare custom agent vs do nothing agent
     
     # Learning parameters
-    'learning_rate': 0.0001,  # 
+    'learning_rate': 0.0005,  # 
     'learning_rate_decay': 0.98,  # Decay LR by 10% per iteration  
-    'min_learning_rate': 0.00000001,  # Minimum learning rate floor
+    'min_learning_rate': 0.000005,  # Minimum learning rate floor
     'exploration_rate': 0.0,  # Lower exploration - policy already learned good actions
-    'exploration_decay': 0.995,  # Gradual decay over training
+    'exploration_decay': 0.999,  # Gradual decay over training
     'min_exploration_rate': 0.00,  # Small minimum to maintain some exploration
-    
-    # Model checkpoint path for evaluation
-    'model_path': 'checkpoints copy 2/alphazero_v2_iter5.pt',
     
     # Safety parameters  
     'intervention_threshold': 0.98,  # Agent acts when max_rho > 95% (evaluation - match training threshold)
-    'critical_threshold': 0.95,      # MCTS training when max_rho > 95% (training - balanced difficulty)
+    'critical_threshold': 0.98,      # MCTS training when max_rho > 95% (training - balanced difficulty)
     # Simple logic: Act whenever rho > 95% to match training behavior
     
     # Memory parameters
@@ -35,7 +32,7 @@ AGENT_CONFIG = {
     'gamma': 0.99,  # Standard discount factor for long-term planning
     
     # Value loss stability parameters (PPO-style)
-    'value_clip_range': 20.0,  # Clip value predictions to ±10 from target
+    'value_clip_range': 10.0,  # Clip value predictions to ±10 from target
     'huber_delta': None,  # Huber loss delta for value head - reduces sensitivity to outliers
     'max_training_chronics': None,  #
     
@@ -44,39 +41,41 @@ AGENT_CONFIG = {
 
     # MCTS parameters
     'mcts_simulations': 1000,  # Number of MCTS simulations per critical state
-    'max_depth': 20,  # Limit tree depth to 10 levels
-    'puct_c': 2.0,  # Standard AlphaZero exploration constant
+    'max_depth': 25,  # Limit tree depth to 25 levels
+    'puct_c': 2.0,  # Higher exploration constant to prevent action collapse
     'mcts_epsilon': 0.0,  # No random exploration during MCTS (Dirichlet handles root)
-    'temperature': 1,  # More deterministic action selection during training (was 0.8)
+    'temperature': 2.0,  # Start with high temperature for exploration (will decay)
+    'temperature_decay': 0.95,  # Decay temperature by 5% each iteration
+    'min_temperature': 0.1,  # Minimum temperature (nearly greedy but not fully)
     't_skipped': 50,  # Number of skipped safe states to be considered recovery node
     't_stopping': 20,  # Stop MCTS early if this many recovery nodes found (good actions exist)
-    'action_prefilter_rho_increase': 0.25,  # RELAXED: Allow more actions (was 0.10)
+    'action_prefilter_rho_increase': 0.20,  # RELAXED: Allow more actions (was 0.10)
     
     # Policy target method
     'policy_target_method': 'visits_with_selection_bias',  # 'one_hot' = one-hot on selected action, 'visits' = visit count distribution, 'max_steps' = distribution based on max_reachable_steps, 'visits_with_selection_bias' = visits + boost selected action
     'policy_temperature': 1.0,  # Temperature for policy distribution (1.0 = no sharpening, just raw visit counts)
-    'selection_bias_weight': 0.3,  # Extra weight multiplier for selected action (e.g., 0.5 = 50% boost)
+    'selection_bias_weight': 0.5,  # DISABLED to prevent action collapse (was 0.4)
     
     # Dirichlet noise for exploration (AlphaZero technique)
     'dirichlet_alpha': 0.3,    # Standard value: generates somewhat uniform noise
-    'dirichlet_epsilon': 0.20,  # 75% network policy + 25% noise for exploration diversity
+    'dirichlet_epsilon': 0.25,  # 50% network policy + 50% noise for strong exploration (was 0.4)
 
     # Neural network parameters
-    'hidden_size': 128,  # Smaller network to reduce overfitting
+    'hidden_size': 64,  # Smaller network to reduce overfitting
     'neural_network_implementation': 'v1',  # Use stable implementation
     
     # Model training parameters
-    'num_cycles': 3,  # Number of times to cycle through all training chronics
-    'episodes_per_iteration': 6,  # INCREASED: More episodes for stable gradient estimates (was 2)
+    'num_cycles': 10,  # Number of times to cycle through all training chronics
+    'episodes_per_iteration': 6,  # Reduced for faster iterations during debugging
     'parallel_workers': 6,  # Number of parallel workers for episode collection (0 = sequential, >0 = parallel)
-    'training_epochs': 10,  # Multiple epochs for proper convergence
+    'training_epochs': 1,  # Reduced from 10 to prevent overfitting/memorization
     'weight_decay': 0.0001,  # Standard L2 regularization
-    'policy_weight': 1.2,  # Balanced loss weighting
+    'policy_weight': 1.0,  # Balanced loss weighting
     'value_weight': 1.0,   # Equal importance for policy and value
     'input_size': 83,  # Extended encoding: 60 line features + 23 bus topology bits
     # Experience replay toggle
     'use_replay_buffer': True,  # Re-enabled with size 1 to avoid training skip bug
-    'replay_buffer_size': 100,  # 60 episodes = 10 iterations (6 episodes/iteration)
+    'replay_buffer_size': 60,  # 10 iterations worth (6 episodes/iteration) to keep recent diverse data
         # Input encoding breakdown:
         # - Line loads (rho): 20 bits [0:20]
         # - Line status: 20 bits [20:40] 
@@ -106,7 +105,7 @@ AGENT_CONFIG = {
     'curtailment_penalty': 0.1,
     
     # Model saving
-    'model_path': 'checkpoints copy 2/alphazero_v2_iter5.pt',  # Path to save/load trained model - use the latest trained model
+    'model_path': 'checkpoints/alphazero_v2_iter10.pt',  # Path to save/load trained model - use the latest trained model
 }
 
 # New actions configuration (catalog-based bus switching)

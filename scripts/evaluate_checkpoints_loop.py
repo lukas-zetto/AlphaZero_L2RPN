@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Evaluation script for checkpoints copy 2 - iterations 1-15
-Copies the exact evaluation logic from evaluate_agent.py
+Evaluation script for all checkpoints in checkpoints/ folder
+Evaluates each checkpoint and plots survival rate over iterations
 """
 
 import os
@@ -9,6 +9,7 @@ import sys
 import numpy as np
 import grid2op
 import matplotlib.pyplot as plt
+import glob
 
 # Add project root to path
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -98,15 +99,36 @@ def main():
     
     print(f"Test scenarios: {len(test_scenarios)} scenarios")
     
+    # Find all checkpoint files and sort numerically
+    checkpoint_files = glob.glob("checkpoints/alphazero_v2_iter*.pt")
+    
+    # Sort by iteration number (extract number from filename)
+    def get_iter_number(path):
+        basename = os.path.basename(path)
+        try:
+            return int(basename.replace("alphazero_v2_iter", "").replace(".pt", ""))
+        except:
+            return 0
+    
+    checkpoint_files = sorted(checkpoint_files, key=get_iter_number)
+    
+    if not checkpoint_files:
+        print("No checkpoints found in checkpoints/ folder!")
+        return
+    
+    print(f"\nFound {len(checkpoint_files)} checkpoints to evaluate")
+    
     # Evaluate each checkpoint
     iterations = []
     survival_rates = []
     
-    for iteration in range(1, 16):
-        checkpoint_path = f"checkpoints copy 2/alphazero_v2_iter{iteration}.pt"
-        
-        if not os.path.exists(checkpoint_path):
-            print(f"\nCheckpoint iter{iteration} not found, skipping...")
+    for checkpoint_path in checkpoint_files:
+        # Extract iteration number from filename
+        basename = os.path.basename(checkpoint_path)
+        try:
+            iteration = int(basename.replace("alphazero_v2_iter", "").replace(".pt", ""))
+        except:
+            print(f"Could not parse iteration from {basename}, skipping...")
             continue
         
         print(f"\n{'='*60}")
@@ -177,10 +199,9 @@ def main():
         
         plt.xlabel('Iteration', fontsize=12)
         plt.ylabel('Survival Rate (%)', fontsize=12)
-        plt.title('Agent Performance Over Training Iterations (Checkpoints Copy 2)', fontsize=14, pad=20)
+        plt.title('Agent Performance Over Training Iterations', fontsize=14, pad=20)
         plt.grid(True, alpha=0.3)
         plt.legend(fontsize=11)
-        plt.xlim(0, 16)
         plt.ylim(0, 100)
         
         # Add annotations for best and worst
@@ -192,7 +213,7 @@ def main():
                     arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0'))
         
         # Save plot
-        output_path = "logs/checkpoints_copy2_performance.png"
+        output_path = "logs/checkpoints_performance.png"
         plt.savefig(output_path, dpi=150, bbox_inches='tight')
         print(f"\n📊 Plot saved to: {output_path}")
         

@@ -50,6 +50,9 @@ class MyCustomAgent(BaseAgent):
 
         # Store reference to current environment
         self.current_env = None
+        
+        # Track last action taken for evaluation statistics
+        self.last_action_taken = None
     
     def set_env(self, env):
         """Update environment reference."""
@@ -136,7 +139,10 @@ class MyCustomAgent(BaseAgent):
                 self._initialize_bus_switching_legacy()
         
         # Get action based on grid state
-        action = self._get_action(observation)
+        action, action_idx = self._get_action(observation)
+        
+        # Store action index for evaluation statistics
+        self.last_action_taken = action_idx
         
         return action
         
@@ -146,13 +152,13 @@ class MyCustomAgent(BaseAgent):
             
         Returns:
         --------
-        action : Action
-            Selected action (do nothing or line switching)
+        tuple : (action, action_idx)
+            Selected action and its catalog index (None if not a catalog action)
         """
         # PRIORITY 1: Auto-reconnect disconnected lines if cooldown ended
         reconnect_action = self._auto_reconnect_lines(observation)
         if reconnect_action is not None:
-            return reconnect_action
+            return reconnect_action, None
         
         # Analyze grid state to determine if action is needed
         grid_state = self._analyze_grid_state(observation)
@@ -166,10 +172,10 @@ class MyCustomAgent(BaseAgent):
             if max_rho <= reset_threshold:
                 reset_action = self._reset_topology_if_modified(observation)
                 if reset_action is not None:
-                    return reset_action
+                    return reset_action, None
             
             # Grid is safe - do nothing
-            return self.action_space()
+            return self.action_space(), None
         
         # Grid needs intervention - use trained neural network if available
         if self.neural_network is not None and self.catalog_ready:
@@ -215,19 +221,19 @@ class MyCustomAgent(BaseAgent):
                     
                 selected_action = self.action_catalog.actions[selected_action_idx].apply(self.action_space)
                 print(f"   🎯 Selected catalog action {selected_action_idx} (Sub {self.action_catalog.actions[selected_action_idx].sub_id})")
-                return selected_action
+                return selected_action, selected_action_idx
                 
             except Exception as e:
                 print(f"   ❌ Neural network action failed: {e}")
-                return self.action_space()  # Do nothing on error
+                return self.action_space(), None  # Do nothing on error
                 
             except Exception as e:
                 print(f"⚠️ Neural network failed: {e}")
                 # Fallback to line switching only if bus actions fail
-                return self._fallback_line_switching_action(observation)
+                return self._fallback_line_switching_action(observation), None
         else:
             # No neural network loaded - use fallback behavior
-            return self._fallback_line_switching_action(observation)
+            return self._fallback_line_switching_action(observation), None
     
     def _auto_reconnect_lines(self, observation):
         """

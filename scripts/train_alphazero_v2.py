@@ -137,7 +137,9 @@ def _parallel_episode_worker(args):
                     max_depth=config['max_depth'],
                     epsilon=config.get('mcts_epsilon', 0.0),
                     value_fn=lambda o: neural_network_forward(neural_network, o, num_actions)[1],
-                    critical_threshold=critical_threshold
+                    critical_threshold=critical_threshold,
+                    dirichlet_alpha=config.get('dirichlet_alpha', 0.3),
+                    dirichlet_epsilon=config.get('dirichlet_epsilon', 0.25)
                 )
                 
                 # Select action (based on max_reachable_steps)
@@ -310,9 +312,14 @@ class AlphaZeroTrainerV2:
         train_size = int(total_chronics * 0.9)
         self.train_chronics = list(range(train_size))
         self.test_chronics = list(range(train_size, total_chronics))
+        
+        # IMPORTANT: Shuffle training chronics to prevent temporal correlation
+        import random
+        random.shuffle(self.train_chronics)
+        
         self.current_chronic_idx = 0  # Index into train_chronics list
         print(f"Created neural network: input={self.input_size}, actions={self.num_actions}")
-        print(f"Chronic split: {len(self.train_chronics)} train ({self.train_chronics[0]}-{self.train_chronics[-1]}), {len(self.test_chronics)} test ({self.test_chronics[0]}-{self.test_chronics[-1]})")
+        print(f"Chronic split: {len(self.train_chronics)} train (SHUFFLED), {len(self.test_chronics)} test ({self.test_chronics[0]}-{self.test_chronics[-1]})")
         print(f"Initial learning rate: {self.learning_rate:.6f}, decay: {self.lr_decay}, min: {self.min_lr:.6f}")
         print(f"Replay buffer: {'ENABLED' if self.use_replay_buffer else 'DISABLED'}, size: {config.get('replay_buffer_size', 0)} episodes")
     
@@ -416,7 +423,9 @@ class AlphaZeroTrainerV2:
                 t_stopping=self.config.get('t_stopping', 30),  # Use config value or default
                 auto_reconnect=self.config.get('auto_reconnect', True),
                 max_reconnections=self.config.get('max_reconnections_per_action', 1),
-                prefilter_rho_increase=self.config.get('action_prefilter_rho_increase', 0.15)
+                prefilter_rho_increase=self.config.get('action_prefilter_rho_increase', 0.15),
+                dirichlet_alpha=self.config.get('dirichlet_alpha', 0.3),
+                dirichlet_epsilon=self.config.get('dirichlet_epsilon', 0.25)
             )
             
             # Print tree statistics for debugging
@@ -471,13 +480,15 @@ class AlphaZeroTrainerV2:
             if terminal_actions > 0:
                 print(f"    ⚠️ Filtered out {terminal_actions} terminal actions (immediate failures)")
             
-            # Select action using max_reachable_steps (greedy, no epsilon here - epsilon only for MCTS exploration)
+            # Select action using GREEDY selection (best action from MCTS)
+            # Temperature is used only for policy target, not action selection
             from training.alphazero_mcts_v2 import select_action
-            action_idx = select_action(root, temperature=0, epsilon=0.0)  # Greedy selection for actual action
+            action_idx = select_action(root, temperature=0, epsilon=0.0)  # Greedy: always pick best action
             
             # Get MCTS policy target based on config
             policy_target_method = self.config.get('policy_target_method', 'visits')
-            policy_temperature = self.config.get('policy_temperature', 1.0)
+            # Use decaying temperature for policy target (exploration in training)
+            policy_temperature = self.current_temperature
             
             if policy_target_method == 'one_hot':
                 # One-hot: target the selected action (which has best max_reachable_steps)
@@ -852,6 +863,7 @@ class AlphaZeroTrainerV2:
                     'num_actions': self.num_actions,
                     'input_size': self.input_size,
                     'hidden_size': self.config.get('hidden_size', 256),
+                    'config': self.config,  # Save full config with checkpoint
                 }, checkpoint_path)
                 print(f"\nCheckpoint saved: {checkpoint_path}")
         
