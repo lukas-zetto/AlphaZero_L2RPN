@@ -55,14 +55,22 @@ def _parallel_episode_worker(args):
         )
         
         # Build action catalog
-        from config import ACTIONS_CONFIG
-        catalog = build_action_catalog(
+        from config import ACTIONS_CONFIG, USE_REDUCED_ACTION_SPACE, REDUCED_ACTIONS
+        full_catalog = build_action_catalog(
             env,
             substations=ACTIONS_CONFIG['substations'],
             reduction=ACTIONS_CONFIG['reduction'],
             drop_identity=ACTIONS_CONFIG['drop_identity'],
             include_do_nothing=ACTIONS_CONFIG.get('include_do_nothing', True)
         )
+        
+        # Apply reduced action space if enabled
+        if USE_REDUCED_ACTION_SPACE:
+            from dataclasses import replace
+            reduced_actions = [full_catalog.actions[idx] for idx in REDUCED_ACTIONS if idx < len(full_catalog.actions)]
+            catalog = replace(full_catalog, actions=reduced_actions)
+        else:
+            catalog = full_catalog
         
         # Create neural network and load shared weights
         input_size = 83
@@ -899,16 +907,26 @@ def main():
     env.seed(seed)
     
     # Build action catalog from config
-    from config import ACTIONS_CONFIG
+    from config import ACTIONS_CONFIG, USE_REDUCED_ACTION_SPACE, REDUCED_ACTIONS
     substations = ACTIONS_CONFIG['substations']
     reduction = ACTIONS_CONFIG['reduction']
     drop_identity = ACTIONS_CONFIG['drop_identity']
     include_do_nothing = ACTIONS_CONFIG.get('include_do_nothing', True)
     
     print(f"Building action catalog: substations={substations}, reduction={reduction}, drop_identity={drop_identity}, include_do_nothing={include_do_nothing}")
-    catalog = build_action_catalog(env, substations=substations, reduction=reduction, 
+    full_catalog = build_action_catalog(env, substations=substations, reduction=reduction, 
                                    drop_identity=drop_identity, include_do_nothing=include_do_nothing)
-    print(f"Action catalog: {len(catalog.actions)} actions")
+    
+    # Apply reduced action space if enabled
+    if USE_REDUCED_ACTION_SPACE:
+        from dataclasses import replace
+        reduced_actions = [full_catalog.actions[idx] for idx in REDUCED_ACTIONS if idx < len(full_catalog.actions)]
+        catalog = replace(full_catalog, actions=reduced_actions)
+        print(f"🎯 Using REDUCED action space: {len(catalog.actions)} actions (indices: {REDUCED_ACTIONS})")
+    else:
+        catalog = full_catalog
+        print(f"Action catalog: {len(catalog.actions)} actions")
+    
     if include_do_nothing:
         print(f"  Action 0: do-nothing (explicit)")
         print(f"  Actions 1-{len(catalog.actions)-1}: topology changes")

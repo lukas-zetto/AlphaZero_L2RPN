@@ -86,14 +86,16 @@ class MCTSNodeV2:
 
 
 def puct_score(node: MCTSNodeV2, child_idx: int, c_puct: float, 
-               parent_value: float = 0.0, depth_bonus: float = 0.05,
-               virtual_loss_weight: float = 0.5) -> float:
+               parent_value: float = 0.0, depth_bonus: float = 0.0,
+               virtual_loss_weight: float = 0.0) -> float:
     """
-    Calculate PUCT score: Q(s,a) + c_puct * P(s,a) * sqrt(N_parent) / (1 + N_child) + depth_bonus
+    Calculate PUCT score: Q(s,a) + c_puct * P(s,a) * sqrt(N_parent) / (1 + N_child)
+    
+    Standard AlphaZero PUCT with optional modifications:
+    - depth_bonus: Encourage exploration of unexpanded/leaf nodes (non-standard)
+    - virtual_loss_weight: Penalize frequently visited nodes for wider trees (non-standard)
     
     For unexpanded actions, use parent's Q-value instead of 0.
-    Small depth_bonus to slightly encourage exploration without causing narrow trees.
-    Virtual loss: Penalize frequently visited nodes to encourage width.
     """
     if child_idx in node.children:
         child = node.children[child_idx]
@@ -102,12 +104,15 @@ def puct_score(node: MCTSNodeV2, child_idx: int, c_puct: float,
         
         # Virtual loss: penalize nodes with many visits to encourage exploring other children
         # This helps create wider trees instead of narrow deep paths
-        parent_visits = max(1, node.visit_count)
-        visit_ratio = n_child / parent_visits
-        virtual_loss = -virtual_loss_weight * visit_ratio  # Penalize if this child dominates visits
+        if virtual_loss_weight > 0:
+            parent_visits = max(1, node.visit_count)
+            visit_ratio = n_child / parent_visits
+            virtual_loss = -virtual_loss_weight * visit_ratio  # Penalize if this child dominates visits
+        else:
+            virtual_loss = 0.0
         
         # Small depth bonus for nodes with no children (encourages going deeper)
-        if len(child.children) == 0 and not child.is_terminal:
+        if depth_bonus > 0 and len(child.children) == 0 and not child.is_terminal:
             depth_reward = depth_bonus
         else:
             depth_reward = 0.0
@@ -116,7 +121,7 @@ def puct_score(node: MCTSNodeV2, child_idx: int, c_puct: float,
         q_value = parent_value
         n_child = 0
         virtual_loss = 0.0
-        depth_reward = depth_bonus * 0.5  # Small bonus for unexpanded
+        depth_reward = depth_bonus * 0.5 if depth_bonus > 0 else 0.0  # Small bonus for unexpanded
     
     prior = node.action_priors.get(child_idx, 1.0 / len(node.action_priors))
     exploration = c_puct * prior * np.sqrt(node.visit_count) / (1 + n_child)
@@ -124,7 +129,8 @@ def puct_score(node: MCTSNodeV2, child_idx: int, c_puct: float,
     return q_value + exploration + depth_reward + virtual_loss
 
 
-def select_child(node: MCTSNodeV2, c_puct: float, epsilon: float = 0.0) -> Tuple[int, bool]:
+def select_child(node: MCTSNodeV2, c_puct: float, epsilon: float = 0.0,
+                depth_bonus: float = 0.0, virtual_loss_weight: float = 0.0) -> Tuple[int, bool]:
     """
     Select child using PUCT with epsilon-greedy exploration.
     
@@ -162,7 +168,7 @@ def select_child(node: MCTSNodeV2, c_puct: float, epsilon: float = 0.0) -> Tuple
         best_action = None
         
         for action_idx in node.unexpanded_actions:
-            score = puct_score(node, action_idx, c_puct, parent_q)
+            score = puct_score(node, action_idx, c_puct, parent_q, depth_bonus, virtual_loss_weight)
             if score > best_score:
                 best_score = score
                 best_action = action_idx
@@ -179,7 +185,7 @@ def select_child(node: MCTSNodeV2, c_puct: float, epsilon: float = 0.0) -> Tuple
             if child.is_terminal:
                 continue
             
-            score = puct_score(node, action_idx, c_puct, parent_q)
+            score = puct_score(node, action_idx, c_puct, parent_q, depth_bonus, virtual_loss_weight)
             if score > best_score:
                 best_score = score
                 best_action = action_idx
@@ -543,7 +549,9 @@ def run_simulation(root: MCTSNodeV2, action_catalog, c_puct: float = 1.0,
                    critical_threshold: float = 0.90,
                    auto_reconnect: bool = True,
                    max_reconnections: int = 1,
-                   prefilter_rho_increase: float = 0.20) -> MCTSNodeV2:
+                   prefilter_rho_increase: float = 0.20,
+                   depth_bonus: float = 0.0,
+                   virtual_loss_weight: float = 0.0) -> MCTSNodeV2:
     """
     Run one MCTS simulation: Selection -> Expansion -> Evaluation -> Backup
     
@@ -553,6 +561,8 @@ def run_simulation(root: MCTSNodeV2, action_catalog, c_puct: float = 1.0,
         auto_reconnect: If True, automatically try to reconnect lines after topology actions
         max_reconnections: Maximum number of lines to reconnect per action
         prefilter_rho_increase: Maximum allowed increase in max_rho (e.g., 0.20 = 20%)
+        depth_bonus: Bonus for unexpanded/leaf nodes (0 = disabled)
+        virtual_loss_weight: Penalty for frequently visited nodes (0 = disabled)
     
     Returns the leaf node that was evaluated.
     """
@@ -577,7 +587,7 @@ def run_simulation(root: MCTSNodeV2, action_catalog, c_puct: float = 1.0,
                 # Can't expand terminal nodes
                 break
             
-            action_idx, is_expanded = select_child(node, c_puct, epsilon)
+            action_idx, is_expanded = select_child(node, c_puct, epsilon, depth_bonus, virtual_loss_weight)
             
             if action_idx is None:
                 # No actions available
@@ -625,7 +635,9 @@ def run_mcts(env, observation, action_catalog, num_simulations: int,
              max_reconnections: int = 1,
              prefilter_rho_increase: float = 0.20,
              dirichlet_alpha: float = 0.3,
-             dirichlet_epsilon: float = 0.25) -> Tuple[MCTSNodeV2, Dict]:
+             dirichlet_epsilon: float = 0.25,
+             depth_bonus: float = 0.0,
+             virtual_loss_weight: float = 0.0) -> Tuple[MCTSNodeV2, Dict]:
     """
     Run MCTS from current state with safe state skipping.
     
@@ -654,6 +666,8 @@ def run_mcts(env, observation, action_catalog, num_simulations: int,
         auto_reconnect: If True, automatically try to reconnect lines after topology actions
         max_reconnections: Maximum number of lines to reconnect per action
         prefilter_rho_increase: Maximum allowed increase in max_rho (e.g., 0.20 = 20%)
+        depth_bonus: Bonus for unexpanded/leaf nodes (0 = disabled)
+        virtual_loss_weight: Penalty for frequently visited nodes (0 = disabled)
     
     Returns:
         (root_node, stats_dict)
@@ -688,7 +702,8 @@ def run_mcts(env, observation, action_catalog, num_simulations: int,
     # Run simulations
     for sim_idx in range(num_simulations):
         leaf = run_simulation(root, action_catalog, c_puct, gamma, value_fn, max_depth, epsilon, force_expand_root, 
-                             critical_threshold, auto_reconnect, max_reconnections, prefilter_rho_increase)
+                             critical_threshold, auto_reconnect, max_reconnections, prefilter_rho_increase,
+                             depth_bonus, virtual_loss_weight)
         
         # Check if leaf is a recovery node (skipped many safe states)
         # Recovery nodes indicate the action leads to long-term safety

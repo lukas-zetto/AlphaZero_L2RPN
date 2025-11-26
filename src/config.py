@@ -19,8 +19,8 @@ AGENT_CONFIG = {
     'min_exploration_rate': 0.00,  # Small minimum to maintain some exploration
     
     # Safety parameters  
-    'intervention_threshold': 0.98,  # Agent acts when max_rho > 95% (evaluation - match training threshold)
-    'critical_threshold': 0.98,      # MCTS training when max_rho > 95% (training - balanced difficulty)
+    'intervention_threshold': 0.95,  # Agent acts when max_rho > 95% (evaluation - match training threshold)
+    'critical_threshold': 0.95,      # MCTS training when max_rho > 95% (training - balanced difficulty)
     # Simple logic: Act whenever rho > 95% to match training behavior
     
     # Memory parameters
@@ -29,10 +29,10 @@ AGENT_CONFIG = {
     
     # Training parameters
     'target_update_frequency': 2000,  # Less frequent updates for stability
-    'gamma': 0.99,  # Standard discount factor for long-term planning
+    'gamma': 0.95,  # Standard discount factor for long-term planning
     
     # Value loss stability parameters (PPO-style)
-    'value_clip_range': 10.0,  # Clip value predictions to ±10 from target
+    'value_clip_range': 20.0,  # Clip value predictions to ±10 from target
     'huber_delta': None,  # Huber loss delta for value head - reduces sensitivity to outliers
     'max_training_chronics': None,  #
     
@@ -51,10 +51,16 @@ AGENT_CONFIG = {
     't_stopping': 20,  # Stop MCTS early if this many recovery nodes found (good actions exist)
     'action_prefilter_rho_increase': 0.20,  # RELAXED: Allow more actions (was 0.10)
     
+    # PUCT modifications for exploration
+    'use_depth_bonus': False,  # Add bonus for unexpanded/leaf nodes to encourage deeper exploration
+    'depth_bonus': 0.05,  # Magnitude of depth bonus (only used if use_depth_bonus=True)
+    'use_virtual_loss': False,  # Penalize frequently visited nodes to encourage wider trees
+    'virtual_loss_weight': 0.5,  # Magnitude of virtual loss penalty (only used if use_virtual_loss=True)
+    
     # Policy target method
-    'policy_target_method': 'visits_with_selection_bias',  # 'one_hot' = one-hot on selected action, 'visits' = visit count distribution, 'max_steps' = distribution based on max_reachable_steps, 'visits_with_selection_bias' = visits + boost selected action
+    'policy_target_method': 'visits',  # 'one_hot' = one-hot on selected action, 'visits' = visit count distribution, 'max_steps' = distribution based on max_reachable_steps, 'visits_with_selection_bias' = visits + boost selected action
     'policy_temperature': 1.0,  # Temperature for policy distribution (1.0 = no sharpening, just raw visit counts)
-    'selection_bias_weight': 0.5,  # DISABLED to prevent action collapse (was 0.4)
+    'selection_bias_weight': 0.0,  # Set to 0 to prevent action collapse
     
     # Dirichlet noise for exploration (AlphaZero technique)
     'dirichlet_alpha': 0.3,    # Standard value: generates somewhat uniform noise
@@ -70,7 +76,7 @@ AGENT_CONFIG = {
     'parallel_workers': 6,  # Number of parallel workers for episode collection (0 = sequential, >0 = parallel)
     'training_epochs': 1,  # Reduced from 10 to prevent overfitting/memorization
     'weight_decay': 0.0001,  # Standard L2 regularization
-    'policy_weight': 1.0,  # Balanced loss weighting
+    'policy_weight': 3.0,  # Balanced loss weighting
     'value_weight': 1.0,   # Equal importance for policy and value
     'input_size': 83,  # Extended encoding: 60 line features + 23 bus topology bits
     # Experience replay toggle
@@ -107,6 +113,10 @@ AGENT_CONFIG = {
     # Model saving
     'model_path': 'checkpoints/alphazero_v2_iter10.pt',  # Path to save/load trained model - use the latest trained model
 }
+
+# Reduced action space configuration
+USE_REDUCED_ACTION_SPACE = False  # Set to True to use only a subset of actions
+REDUCED_ACTIONS = [0, 9, 17, 22, 26, 29, 54, 59]  # Indices from full catalog to keep (0=do-nothing always included)
 
 # New actions configuration (catalog-based bus switching)
 # This enables dynamic enumeration of full substation bus layouts.

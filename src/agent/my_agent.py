@@ -79,8 +79,24 @@ class MyCustomAgent(BaseAgent):
             subs = self.actions_config.get('substations', [3,4,5,8])
             reduction = self.actions_config.get('reduction', 'N1')
             drop_identity = self.actions_config.get('drop_identity', True)
-            self.action_catalog = build_action_catalog(env, subs, reduction, drop_identity)
-            print("✅ Built catalog-based action space")
+            
+            # Build full catalog first
+            full_catalog = build_action_catalog(env, subs, reduction, drop_identity)
+            
+            # Apply reduced action space if enabled
+            try:
+                from src.config import USE_REDUCED_ACTION_SPACE, REDUCED_ACTIONS
+                if USE_REDUCED_ACTION_SPACE:
+                    from dataclasses import replace
+                    reduced_actions = [full_catalog.actions[idx] for idx in REDUCED_ACTIONS if idx < len(full_catalog.actions)]
+                    self.action_catalog = replace(full_catalog, actions=reduced_actions)
+                    print(f"✅ Built REDUCED catalog-based action space with {len(reduced_actions)} actions (indices: {REDUCED_ACTIONS})")
+                else:
+                    self.action_catalog = full_catalog
+                    print("✅ Built catalog-based action space")
+            except ImportError:
+                self.action_catalog = full_catalog
+                print("✅ Built catalog-based action space")
             if summarize_catalog:
                 print(summarize_catalog(self.action_catalog))
             self.catalog_ready = True
