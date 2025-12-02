@@ -56,6 +56,7 @@ AGENT_CONFIG = {
     'depth_bonus': 0.05,  # Magnitude of depth bonus (only used if use_depth_bonus=True)
     'use_virtual_loss': False,  # Penalize frequently visited nodes to encourage wider trees
     'virtual_loss_weight': 0.5,  # Magnitude of virtual loss penalty (only used if use_virtual_loss=True)
+    'penalty_for_failure': -5.0,  # Penalty reward for failed episodes (negative value)
     
     # Policy target method
     'policy_target_method': 'visits',  # 'one_hot' = one-hot on selected action, 'visits' = visit count distribution, 'max_steps' = distribution based on max_reachable_steps, 'visits_with_selection_bias' = visits + boost selected action
@@ -71,7 +72,7 @@ AGENT_CONFIG = {
     'neural_network_implementation': 'v1',  # Use stable implementation
     
     # Model training parameters
-    'num_cycles': 10,  # Number of times to cycle through all training chronics
+    'num_cycles': 1,  # For optimization: 1 cycle is enough for quick evaluation
     'episodes_per_iteration': 6,  # Reduced for faster iterations during debugging
     'parallel_workers': 6,  # Number of parallel workers for episode collection (0 = sequential, >0 = parallel)
     'training_epochs': 1,  # Reduced from 10 to prevent overfitting/memorization
@@ -171,7 +172,13 @@ TRAINING_CONFIG = {
     'save_frequency': 100,  # Save model every N episodes
     'log_frequency': 10,    # Log progress every N episodes
     'early_stopping_patience': 200,
+    
+    # Chronic selection configuration
+    'chronic_seed': 42,  # Seed for deterministic chronic selection (set None for random)
+    'train_test_split': 0.9,  # 90% of chronics for training, 10% for test pool
+    'num_test_chronics': None,  # Number of chronics to randomly select from test pool (None = use all test chronics)
 }
+
 
 # Evaluation configuration
 EVAL_CONFIG = {

@@ -1,0 +1,23 @@
+{
+  "mcts_simulations": 200,
+  "puct_c": 1.6004958347658318,
+  "temperature": 2.04783951613304,
+  "temperature_decay": 0.9776841089115318,
+  "dirichlet_epsilon": 0.2582295522215907,
+  "dirichlet_alpha": 0.7126820921028161,
+  "learning_rate": 6.355186392264343e-05,
+  "training_epochs": 7,
+  "replay_buffer_size": 60,
+  "critical_threshold": 0.960009282743545,
+  "intervention_threshold": 0.960009282743545,
+  "policy_target_method": "visits_with_selection_bias",
+  "selection_bias_weight": 0.6892904433423741,
+  "use_depth_bonus": true,
+  "depth_bonus": 0.08923235762726314,
+  "use_virtual_loss": false,
+  "virtual_loss_weight": 0.0,
+  "episodes_per_iteration": 5,
+  "policy_weight": 1.9509192676823355,
+  "value_weight": 1.86523931360271,
+  "penalty_for_failure": -5.945154897210426
+}

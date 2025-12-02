@@ -47,7 +47,7 @@ def _parallel_episode_worker(args):
         
         # Create environment
         params = Parameters()
-        params.NO_OVERFLOW_DISCONNECTION = True
+        params.NO_OVERFLOW_DISCONNECTION = False
         env = grid2op.make(
             "l2rpn_case14_sandbox",
             backend=LightSimBackend(),
@@ -144,10 +144,12 @@ def _parallel_episode_worker(args):
                     gamma=config['gamma'],
                     max_depth=config['max_depth'],
                     epsilon=config.get('mcts_epsilon', 0.0),
+                    policy_fn=lambda o: neural_network_forward(neural_network, o, num_actions)[0],
                     value_fn=lambda o: neural_network_forward(neural_network, o, num_actions)[1],
                     critical_threshold=critical_threshold,
                     dirichlet_alpha=config.get('dirichlet_alpha', 0.3),
-                    dirichlet_epsilon=config.get('dirichlet_epsilon', 0.25)
+                    dirichlet_epsilon=config.get('dirichlet_epsilon', 0.25),
+                    penalty_for_failure=config.get('penalty_for_failure', -5.0)
                 )
                 
                 # Select action (based on max_reachable_steps)
@@ -315,21 +317,53 @@ class AlphaZeroTrainerV2:
         
         # Training data buffer - stores EPISODES (each episode is a list of experiences)
         self.replay_buffer = deque(maxlen=config.get('replay_buffer_size', 100))
-        # Split chronics into 90% train / 10% test
-        total_chronics = len(env.chronics_handler.real_data.subpaths)
-        train_size = int(total_chronics * 0.9)
-        self.train_chronics = list(range(train_size))
-        self.test_chronics = list(range(train_size, total_chronics))
         
-        # IMPORTANT: Shuffle training chronics to prevent temporal correlation
+        # Split chronics into train/test with random test selection
+        from config import TRAINING_CONFIG
+        total_chronics = len(env.chronics_handler.real_data.subpaths)
+        train_test_split = TRAINING_CONFIG.get('train_test_split', 0.9)
+        num_test_chronics = TRAINING_CONFIG.get('num_test_chronics', None)
+        chronic_seed = TRAINING_CONFIG.get('chronic_seed', None)
+        
+        # Create split: first X% for training pool, remaining for test pool
+        train_pool_size = int(total_chronics * train_test_split)
+        self.train_chronics = list(range(train_pool_size))
+        
+        # Get test pool from remaining chronics
+        test_pool = list(range(train_pool_size, total_chronics))
+        
+        # Use seed for deterministic selection if provided
         import random
+        if chronic_seed is not None:
+            random.seed(chronic_seed)
+            
+        # Select test chronics: either a random subset or all test chronics
+        if num_test_chronics is None:
+            # Use all chronics from test pool
+            self.test_chronics = test_pool
+        elif len(test_pool) >= num_test_chronics:
+            # Randomly select subset from test pool
+            self.test_chronics = sorted(random.sample(test_pool, num_test_chronics))
+        else:
+            # Test pool smaller than requested, use all
+            self.test_chronics = test_pool
+            print(f"⚠️  Warning: Only {len(test_pool)} chronics available for testing (requested {num_test_chronics})")
+        
+        # Shuffle training chronics to prevent temporal correlation
+        if chronic_seed is not None:
+            random.seed(chronic_seed)
         random.shuffle(self.train_chronics)
         
         self.current_chronic_idx = 0  # Index into train_chronics list
         print(f"Created neural network: input={self.input_size}, actions={self.num_actions}")
-        print(f"Chronic split: {len(self.train_chronics)} train (SHUFFLED), {len(self.test_chronics)} test ({self.test_chronics[0]}-{self.test_chronics[-1]})")
+        print(f"Chronic selection (seed={chronic_seed}):")
+        print(f"  Total chronics: {total_chronics}")
+        print(f"  Training pool: 0-{train_pool_size-1} ({train_pool_size} chronics, SHUFFLED)")
+        print(f"  Test pool: {train_pool_size}-{total_chronics-1} ({len(test_pool)} chronics)")
+        print(f"  Test chronics selected: {len(self.test_chronics)} chronics - {self.test_chronics}")
         print(f"Initial learning rate: {self.learning_rate:.6f}, decay: {self.lr_decay}, min: {self.min_lr:.6f}")
         print(f"Replay buffer: {'ENABLED' if self.use_replay_buffer else 'DISABLED'}, size: {config.get('replay_buffer_size', 0)} episodes")
+
     
     def get_policy_value(self, observation):
         """Get policy and value from neural network."""
@@ -397,6 +431,7 @@ class AlphaZeroTrainerV2:
             critical_threshold = self.config.get('critical_threshold', 0.90)
             
             # COMPARISON: What would do-nothing do?
+            do_nothing_failed = False
             try:
                 do_nothing_action = self.env.action_space()
                 sim_obs, sim_reward, sim_done, sim_info = obs.simulate(do_nothing_action)
@@ -404,6 +439,7 @@ class AlphaZeroTrainerV2:
                 rho_delta = do_nothing_rho - max_rho
                 if sim_done:
                     print(f"  🚫 Do-nothing would FAIL (rho={do_nothing_rho:.3f})")
+                    do_nothing_failed = True
                 elif rho_delta > 0:
                     print(f"  ⬆️ Do-nothing would increase rho: {max_rho:.3f} → {do_nothing_rho:.3f} (+{rho_delta:.3f})")
                 elif rho_delta < 0:
@@ -412,6 +448,7 @@ class AlphaZeroTrainerV2:
                     print(f"  ➡️ Do-nothing would maintain rho: {max_rho:.3f}")
             except Exception as e:
                 print(f"  ⚠️ Could not simulate do-nothing: {e}")
+                do_nothing_failed = True
             
             print(f"  Running MCTS with {self.config['mcts_simulations']} simulations (epsilon={epsilon}, threshold={critical_threshold})...")
             
@@ -422,6 +459,7 @@ class AlphaZeroTrainerV2:
                 num_simulations=self.config['mcts_simulations'],
                 c_puct=self.config['c_puct'],  # Fixed: use 'c_puct' not 'puct_c'
                 gamma=self.config['gamma'],
+                policy_fn=lambda o: self.get_policy_value(o)[0],  # Use NN policy
                 value_fn=lambda o: self.get_policy_value(o)[1],  # Use NN value
                 max_depth=self.config['max_depth'],
                 epsilon=epsilon,
@@ -433,7 +471,8 @@ class AlphaZeroTrainerV2:
                 max_reconnections=self.config.get('max_reconnections_per_action', 1),
                 prefilter_rho_increase=self.config.get('action_prefilter_rho_increase', 0.15),
                 dirichlet_alpha=self.config.get('dirichlet_alpha', 0.3),
-                dirichlet_epsilon=self.config.get('dirichlet_epsilon', 0.25)
+                dirichlet_epsilon=self.config.get('dirichlet_epsilon', 0.25),
+                penalty_for_failure=self.config.get('penalty_for_failure', -5.0)
             )
             
             # Print tree statistics for debugging
@@ -589,18 +628,25 @@ class AlphaZeroTrainerV2:
                 print(f"    After  (top 3): " + ", ".join([f"L{i}={rho_after[i]:.2f}" for i in top_lines_after]))
                 print(f"    Max change: {actual_rho_change:+.3f}")
                 
-                # Compare with do-nothing
-                if 'do_nothing_rho' in locals():
+                # Compare with do-nothing (only if do-nothing didn't fail)
+                if 'do_nothing_rho' in locals() and not do_nothing_failed:
                     do_nothing_change = do_nothing_rho - rho_before.max()
                     actual_change = rho_after.max() - rho_before.max()
+                    
+                    # For comparison: negative = rho decreased (good), positive = rho increased (bad)
+                    # Better action = more negative change (bigger decrease) or less positive change (smaller increase)
                     if actual_change < do_nothing_change:
+                        # Actual is more negative (better decrease) or less positive (smaller increase)
                         improvement = do_nothing_change - actual_change
                         print(f"    ✅ Better than do-nothing by {improvement:.3f} (do-nothing: {do_nothing_change:+.3f}, actual: {actual_change:+.3f})")
                     elif actual_change > do_nothing_change:
+                        # Actual is less negative (worse decrease) or more positive (bigger increase)
                         worse = actual_change - do_nothing_change
-                        print(f"    ❌ WORSE than do-nothing by {worse:.3f} (do-nothing: {do_nothing_change:+.3f}, actual: {actual_change:+.3f})")
+                        print(f"    ❌ WORSE than do-nothing by {worse:.3f} (do-nothing would have changed by {do_nothing_change:+.3f}, actual: {actual_change:+.3f})")
                     else:
                         print(f"    ➡️ Same as do-nothing ({actual_change:+.3f})")
+                elif do_nothing_failed:
+                    print(f"    ℹ️ Any action is better than do-nothing (which would fail)")
 
             
             if done:
@@ -895,7 +941,7 @@ def main():
     print(f"Loading environment: {env_name}")
     
     params = Parameters()
-    params.NO_OVERFLOW_DISCONNECTION = True
+    params.NO_OVERFLOW_DISCONNECTION = False
     
     env = grid2op.make(
         env_name,
@@ -934,36 +980,73 @@ def main():
     # Load training configuration from config.py
     from config import AGENT_CONFIG, TRAINING_CONFIG
     
+    # Override config with environment variables (for Optuna trials)
+    def get_config_value(key, default):
+        """Get config value from environment variable or default"""
+        env_key = f'OPTUNA_{key.upper()}'
+        if env_key in os.environ:
+            value = os.environ[env_key]
+            # Parse value type
+            if value.lower() in ('true', 'false'):
+                return value.lower() == 'true'
+            try:
+                # Try int first, then float
+                if '.' not in value:
+                    return int(value)
+                return float(value)
+            except ValueError:
+                return value  # Return as string
+        return default
+    
     config = {
-        # MCTS parameters from config.py
-        'mcts_simulations': AGENT_CONFIG['mcts_simulations'],
-        'c_puct': AGENT_CONFIG['puct_c'],
+        # MCTS parameters from config.py (can be overridden by env vars)
+        'mcts_simulations': get_config_value('mcts_simulations', AGENT_CONFIG['mcts_simulations']),
+        'c_puct': get_config_value('puct_c', AGENT_CONFIG['puct_c']),
         'gamma': AGENT_CONFIG['gamma'],
         'max_depth': AGENT_CONFIG['max_depth'],
-        'temperature': AGENT_CONFIG['temperature'],
-        'critical_threshold': AGENT_CONFIG['critical_threshold'],  # Only act when rho > threshold
-        'mcts_epsilon': AGENT_CONFIG['mcts_epsilon'],  # Epsilon-greedy exploration in MCTS
-        'action_prefilter_rho_increase': AGENT_CONFIG.get('action_prefilter_rho_increase', 0.15),  # Pre-filter bad actions
-        't_skipped': AGENT_CONFIG['t_skipped'],  # Recovery node threshold
-        't_stopping': AGENT_CONFIG['t_stopping'],  # Early stopping threshold
+        'temperature': get_config_value('temperature', AGENT_CONFIG['temperature']),
+        'critical_threshold': get_config_value('critical_threshold', AGENT_CONFIG['critical_threshold']),
+        'mcts_epsilon': AGENT_CONFIG['mcts_epsilon'],
+        'action_prefilter_rho_increase': AGENT_CONFIG.get('action_prefilter_rho_increase', 0.15),
+        't_skipped': AGENT_CONFIG['t_skipped'],
+        't_stopping': AGENT_CONFIG['t_stopping'],
         
         # Policy target parameters
-        'policy_target_method': AGENT_CONFIG.get('policy_target_method', 'visits'),
+        'policy_target_method': get_config_value('policy_target_method', AGENT_CONFIG.get('policy_target_method', 'visits')),
         'policy_temperature': AGENT_CONFIG.get('policy_temperature', 1.0),
+        'selection_bias_weight': get_config_value('selection_bias_weight', AGENT_CONFIG.get('selection_bias_weight', 0.0)),
+        
+        # PUCT modifications
+        'use_depth_bonus': get_config_value('use_depth_bonus', AGENT_CONFIG.get('use_depth_bonus', False)),
+        'depth_bonus': get_config_value('depth_bonus', AGENT_CONFIG.get('depth_bonus', 0.0)),
+        'use_virtual_loss': get_config_value('use_virtual_loss', AGENT_CONFIG.get('use_virtual_loss', False)),
+        'virtual_loss_weight': get_config_value('virtual_loss_weight', AGENT_CONFIG.get('virtual_loss_weight', 0.0)),
+        'penalty_for_failure': get_config_value('penalty_for_failure', AGENT_CONFIG.get('penalty_for_failure', -5.0)),
+        
+        # Dirichlet noise
+        'dirichlet_epsilon': get_config_value('dirichlet_epsilon', AGENT_CONFIG.get('dirichlet_epsilon', 0.25)),
+        'dirichlet_alpha': get_config_value('dirichlet_alpha', AGENT_CONFIG.get('dirichlet_alpha', 0.3)),
+        
+        # Temperature decay
+        'temperature_decay': get_config_value('temperature_decay', AGENT_CONFIG.get('temperature_decay', 0.95)),
 
 
         # Training parameters
-        'episodes_per_iteration': AGENT_CONFIG['episodes_per_iteration'],  # From config
-        'parallel_workers': AGENT_CONFIG.get('parallel_workers', 0),  # Number of parallel workers for episode collection
-        'max_episode_steps': TRAINING_CONFIG.get('max_steps_per_episode', 10000) or 10000,  # From TRAINING_CONFIG, default 10000 if None
-        'replay_buffer_size': AGENT_CONFIG.get('replay_buffer_size', 100),  # From config
-        'use_replay_buffer': AGENT_CONFIG.get('use_replay_buffer', True),  # From config
+        'episodes_per_iteration': get_config_value('episodes_per_iteration', AGENT_CONFIG['episodes_per_iteration']),
+        'parallel_workers': get_config_value('parallel_workers', AGENT_CONFIG.get('parallel_workers', 0)),
+        'max_episode_steps': TRAINING_CONFIG.get('max_steps_per_episode', 10000) or 10000,
+        'replay_buffer_size': get_config_value('replay_buffer_size', AGENT_CONFIG.get('replay_buffer_size', 100)),
+        'use_replay_buffer': AGENT_CONFIG.get('use_replay_buffer', True),
         'batch_size': AGENT_CONFIG['batch_size'],
-        'learning_rate': AGENT_CONFIG['learning_rate'],
-        'learning_rate_decay': AGENT_CONFIG.get('learning_rate_decay', 1.0),
+        'learning_rate': get_config_value('learning_rate', AGENT_CONFIG['learning_rate']),
+        'learning_rate_decay': get_config_value('learning_rate_decay', AGENT_CONFIG.get('learning_rate_decay', 1.0)),
         'min_learning_rate': AGENT_CONFIG['min_learning_rate'],
         'weight_decay': AGENT_CONFIG['weight_decay'],
-        'training_epochs': AGENT_CONFIG['training_epochs'],  # Correct key name
+        'training_epochs': get_config_value('training_epochs', AGENT_CONFIG['training_epochs']),
+        
+        # Loss weights
+        'policy_weight': get_config_value('policy_weight', AGENT_CONFIG.get('policy_weight', 3.0)),
+        'value_weight': get_config_value('value_weight', AGENT_CONFIG.get('value_weight', 1.0)),
         
         # Checkpointing
         'save_every': 1,  # Save checkpoint every iteration
@@ -985,12 +1068,17 @@ def main():
     trainer = AlphaZeroTrainerV2(env, catalog, config)
     
     # Run training
-    num_cycles = AGENT_CONFIG.get('num_cycles', 50)
+    num_cycles = get_config_value('num_cycles', AGENT_CONFIG.get('num_cycles', 50))
     episodes_per_iteration = AGENT_CONFIG.get('episodes_per_iteration', 2)
     
     # Calculate total iterations: (num_cycles * train_chronics) / episodes_per_iteration
     num_train_chronics = len(trainer.train_chronics)
     total_iterations = (num_cycles * num_train_chronics) // episodes_per_iteration
+    
+    # Apply max_training_iterations limit if set via environment variable
+    max_training_iterations = get_config_value('max_training_iterations', None)
+    if max_training_iterations is not None:
+        total_iterations = min(total_iterations, max_training_iterations)
     
     print(f"Training plan:")
     print(f"  Training chronics: {num_train_chronics}")

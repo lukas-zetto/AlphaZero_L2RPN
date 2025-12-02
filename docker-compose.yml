@@ -1,0 +1,20 @@
+services:
+  topology_optimization:
+    image: bdonnot/l2rpn:idf.2023.4
+    container_name: topology_optimization
+    volumes:
+      - /home/queno/queno:/workspace
+      - grid2op-data:/root/data_grid2op
+    working_dir: /workspace
+    command: >
+      bash -c "
+        pip3 install optuna pandas plotly &&
+        mkdir -p optimization_results_v2 logs &&
+        python3 -c 'import grid2op; grid2op.make(\"l2rpn_case14_sandbox\")' &&
+        python3 scripts/optimize_hyperparams_v2.py > logs/optimization_v2.log 2>&1
+      "
+    restart: "no"
+
+volumes:
+  grid2op-data:
+    external: true

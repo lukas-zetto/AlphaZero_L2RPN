@@ -87,7 +87,8 @@ class MCTSNodeV2:
 
 def puct_score(node: MCTSNodeV2, child_idx: int, c_puct: float, 
                parent_value: float = 0.0, depth_bonus: float = 0.0,
-               virtual_loss_weight: float = 0.0) -> float:
+               virtual_loss_weight: float = 0.0,
+               value_fn: Optional[Callable] = None) -> float:
     """
     Calculate PUCT score: Q(s,a) + c_puct * P(s,a) * sqrt(N_parent) / (1 + N_child)
     
@@ -95,7 +96,7 @@ def puct_score(node: MCTSNodeV2, child_idx: int, c_puct: float,
     - depth_bonus: Encourage exploration of unexpanded/leaf nodes (non-standard)
     - virtual_loss_weight: Penalize frequently visited nodes for wider trees (non-standard)
     
-    For unexpanded actions, use parent's Q-value instead of 0.
+    For unexpanded actions, uses NN value estimate if available, else parent's Q-value.
     """
     if child_idx in node.children:
         child = node.children[child_idx]
@@ -117,8 +118,14 @@ def puct_score(node: MCTSNodeV2, child_idx: int, c_puct: float,
         else:
             depth_reward = 0.0
     else:
-        # Unexpanded action: use parent's value as estimate
-        q_value = parent_value
+        # Unexpanded action: use NN value estimate if available, else parent's value
+        if value_fn is not None and node.observation is not None:
+            try:
+                q_value = value_fn(node.observation)
+            except:
+                q_value = parent_value
+        else:
+            q_value = parent_value
         n_child = 0
         virtual_loss = 0.0
         depth_reward = depth_bonus * 0.5 if depth_bonus > 0 else 0.0  # Small bonus for unexpanded
@@ -130,7 +137,8 @@ def puct_score(node: MCTSNodeV2, child_idx: int, c_puct: float,
 
 
 def select_child(node: MCTSNodeV2, c_puct: float, epsilon: float = 0.0,
-                depth_bonus: float = 0.0, virtual_loss_weight: float = 0.0) -> Tuple[int, bool]:
+                depth_bonus: float = 0.0, virtual_loss_weight: float = 0.0,
+                value_fn: Optional[Callable] = None) -> Tuple[int, bool]:
     """
     Select child using PUCT with epsilon-greedy exploration.
     
@@ -168,7 +176,7 @@ def select_child(node: MCTSNodeV2, c_puct: float, epsilon: float = 0.0,
         best_action = None
         
         for action_idx in node.unexpanded_actions:
-            score = puct_score(node, action_idx, c_puct, parent_q, depth_bonus, virtual_loss_weight)
+            score = puct_score(node, action_idx, c_puct, parent_q, depth_bonus, virtual_loss_weight, value_fn)
             if score > best_score:
                 best_score = score
                 best_action = action_idx
@@ -185,7 +193,7 @@ def select_child(node: MCTSNodeV2, c_puct: float, epsilon: float = 0.0,
             if child.is_terminal:
                 continue
             
-            score = puct_score(node, action_idx, c_puct, parent_q, depth_bonus, virtual_loss_weight)
+            score = puct_score(node, action_idx, c_puct, parent_q, depth_bonus, virtual_loss_weight, value_fn)
             if score > best_score:
                 best_score = score
                 best_action = action_idx
@@ -237,7 +245,8 @@ def expand_node(node: MCTSNodeV2, action_catalog, action_idx: int,
                 penalty_for_failure: float = -5.0,
                 auto_reconnect: bool = True,
                 max_reconnections: int = 1,
-                prefilter_rho_increase: float = 0.20) -> Optional[MCTSNodeV2]:
+                prefilter_rho_increase: float = 0.20,
+                policy_fn: Optional[Callable] = None) -> Optional[MCTSNodeV2]:
     """
     Expand a new child by taking action_idx in node's environment.
     
@@ -452,9 +461,23 @@ def expand_node(node: MCTSNodeV2, action_catalog, action_idx: int,
         # Initialize child's action space
         if not done:
             child.unexpanded_actions = list(range(len(action_catalog.actions)))
-            # Uniform priors for now (could use neural network)
             n_actions = len(action_catalog.actions)
-            child.action_priors = {i: 1.0/n_actions for i in range(n_actions)}
+            
+            # Get action priors from neural network policy for this child state
+            if policy_fn is not None and obs is not None:
+                try:
+                    policy_probs = policy_fn(obs)
+                    policy_probs = np.array(policy_probs)
+                    if policy_probs.sum() > 0:
+                        policy_probs = policy_probs / policy_probs.sum()
+                    else:
+                        policy_probs = np.ones(n_actions) / n_actions
+                    child.action_priors = {i: float(policy_probs[i]) for i in range(n_actions)}
+                except:
+                    # Fallback to uniform if NN fails
+                    child.action_priors = {i: 1.0/n_actions for i in range(n_actions)}
+            else:
+                child.action_priors = {i: 1.0/n_actions for i in range(n_actions)}
         else:
             # Terminal node - close the env copy to avoid leaks
             try:
@@ -551,7 +574,9 @@ def run_simulation(root: MCTSNodeV2, action_catalog, c_puct: float = 1.0,
                    max_reconnections: int = 1,
                    prefilter_rho_increase: float = 0.20,
                    depth_bonus: float = 0.0,
-                   virtual_loss_weight: float = 0.0) -> MCTSNodeV2:
+                   virtual_loss_weight: float = 0.0,
+                   penalty_for_failure: float = -5.0,
+                   policy_fn: Optional[Callable] = None) -> MCTSNodeV2:
     """
     Run one MCTS simulation: Selection -> Expansion -> Evaluation -> Backup
     
@@ -587,7 +612,7 @@ def run_simulation(root: MCTSNodeV2, action_catalog, c_puct: float = 1.0,
                 # Can't expand terminal nodes
                 break
             
-            action_idx, is_expanded = select_child(node, c_puct, epsilon, depth_bonus, virtual_loss_weight)
+            action_idx, is_expanded = select_child(node, c_puct, epsilon, depth_bonus, virtual_loss_weight, value_fn)
             
             if action_idx is None:
                 # No actions available
@@ -606,9 +631,11 @@ def run_simulation(root: MCTSNodeV2, action_catalog, c_puct: float = 1.0,
     if action_idx is not None and not is_expanded and not node.is_terminal:
         child = expand_node(node, action_catalog, action_idx, 
                            critical_threshold=critical_threshold,
+                           penalty_for_failure=penalty_for_failure,
                            auto_reconnect=auto_reconnect,
                            max_reconnections=max_reconnections,
-                           prefilter_rho_increase=prefilter_rho_increase)
+                           prefilter_rho_increase=prefilter_rho_increase,
+                           policy_fn=policy_fn)
         if child is not None:
             node.children[action_idx] = child
             node.unexpanded_actions.remove(action_idx)
@@ -625,6 +652,7 @@ def run_simulation(root: MCTSNodeV2, action_catalog, c_puct: float = 1.0,
 
 def run_mcts(env, observation, action_catalog, num_simulations: int,
              c_puct: float = 1.0, gamma: float = 0.99,
+             policy_fn: Optional[Callable] = None,
              value_fn: Optional[Callable] = None,
              max_depth: int = 100, epsilon: float = 0.0,
              force_expand_root: bool = True, verbose: bool = False,
@@ -637,7 +665,8 @@ def run_mcts(env, observation, action_catalog, num_simulations: int,
              dirichlet_alpha: float = 0.3,
              dirichlet_epsilon: float = 0.25,
              depth_bonus: float = 0.0,
-             virtual_loss_weight: float = 0.0) -> Tuple[MCTSNodeV2, Dict]:
+             virtual_loss_weight: float = 0.0,
+             penalty_for_failure: float = -5.0) -> Tuple[MCTSNodeV2, Dict]:
     """
     Run MCTS from current state with safe state skipping.
     
@@ -687,7 +716,23 @@ def run_mcts(env, observation, action_catalog, num_simulations: int,
     # Initialize root's action space
     n_actions = len(action_catalog.actions)
     root.unexpanded_actions = list(range(n_actions))
-    root.action_priors = {i: 1.0/n_actions for i in range(n_actions)}
+    
+    # Get action priors from neural network policy, or use uniform if not available
+    if policy_fn is not None:
+        try:
+            policy_probs = policy_fn(observation)
+            # Normalize to ensure valid probability distribution
+            policy_probs = np.array(policy_probs)
+            if policy_probs.sum() > 0:
+                policy_probs = policy_probs / policy_probs.sum()
+            else:
+                policy_probs = np.ones(n_actions) / n_actions
+            root.action_priors = {i: float(policy_probs[i]) for i in range(n_actions)}
+        except:
+            # Fallback to uniform if NN fails
+            root.action_priors = {i: 1.0/n_actions for i in range(n_actions)}
+    else:
+        root.action_priors = {i: 1.0/n_actions for i in range(n_actions)}
     
     # Add Dirichlet noise to root priors for exploration (AlphaZero technique)
     # dirichlet_alpha controls concentration (lower = more uniform noise)
@@ -703,7 +748,7 @@ def run_mcts(env, observation, action_catalog, num_simulations: int,
     for sim_idx in range(num_simulations):
         leaf = run_simulation(root, action_catalog, c_puct, gamma, value_fn, max_depth, epsilon, force_expand_root, 
                              critical_threshold, auto_reconnect, max_reconnections, prefilter_rho_increase,
-                             depth_bonus, virtual_loss_weight)
+                             depth_bonus, virtual_loss_weight, penalty_for_failure, policy_fn)
         
         # Check if leaf is a recovery node (skipped many safe states)
         # Recovery nodes indicate the action leads to long-term safety
@@ -853,16 +898,28 @@ def select_action(root: MCTSNodeV2, temperature: float = 1.0, epsilon: float = 0
     if np.random.random() < epsilon:
         return np.random.choice(actions)
     
-    # Get visit counts for all non-terminal actions
-    visits = np.array([non_terminal_actions[a].visit_count for a in actions])
+    # Multi-factor selection: max_reachable_steps (primary) → visits (secondary) → Q-value (tertiary)
+    children = [non_terminal_actions[a] for a in actions]
+    max_steps = np.array([child.max_reachable_steps for child in children])
+    visits = np.array([child.visit_count for child in children])
+    q_values = np.array([child.value() for child in children])
     
     # Temperature-based selection
     if temperature == 0 or visits.sum() == 0:
-        # Greedy: select action with most visits
-        best_idx = np.argmax(visits)
-        return actions[best_idx]
+        # Greedy: select by (max_steps, visits, Q-value) lexicographic ordering
+        # Find all actions with maximum reachable steps
+        best_steps = np.max(max_steps)
+        best_steps_mask = (max_steps == best_steps)
+        
+        # Among those, find ones with most visits
+        best_visits = np.max(visits[best_steps_mask])
+        best_visits_mask = best_steps_mask & (visits == best_visits)
+        
+        # Among those, select by highest Q-value
+        best_q_idx = np.argmax(np.where(best_visits_mask, q_values, -np.inf))
+        return actions[best_q_idx]
     else:
-        # Sample from visit distribution with temperature
+        # Sample from visit distribution with temperature (standard AlphaZero during training)
         # Higher temperature = more uniform, lower = more peaked
         visits_temp = np.power(visits, 1.0 / temperature)
         probs = visits_temp / visits_temp.sum()

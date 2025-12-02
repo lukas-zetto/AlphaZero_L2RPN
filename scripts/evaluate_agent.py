@@ -17,21 +17,44 @@ sys.path.insert(0, project_root)
 
 from src.agent.my_agent import MyCustomAgent
 from src.rewards.custom_reward import MyCustomReward
-from src.config import AGENT_CONFIG, ENV_CONFIG, EVAL_CONFIG, ACTIONS_CONFIG
+from src.config import AGENT_CONFIG, ENV_CONFIG, EVAL_CONFIG, ACTIONS_CONFIG, TRAINING_CONFIG
 
 
 def get_test_scenarios(env, max_episodes=None):
-    """Get test scenarios based on 90/10 split or configuration"""
+    """Get test scenarios based on random selection from test pool (same as training)"""
+    import random
     
     total_scenarios = len(env.chronics_handler.subpaths)
     
-    # Calculate 90/10 split
-    train_size = int(total_scenarios * 0.9)
-    test_scenarios = list(range(train_size, total_scenarios))  # Last 10%
+    # Use same split configuration as training
+    train_test_split = TRAINING_CONFIG.get('train_test_split', 0.9)
+    num_test_chronics = TRAINING_CONFIG.get('num_test_chronics', None)
+    chronic_seed = TRAINING_CONFIG.get('chronic_seed', None)
+    
+    # Create split: first X% for training pool, remaining for test pool
+    train_pool_size = int(total_scenarios * train_test_split)
+    test_pool = list(range(train_pool_size, total_scenarios))
+    
+    # Use seed for deterministic selection if provided
+    if chronic_seed is not None:
+        random.seed(chronic_seed)
+    
+    # Select test chronics: either a random subset or all test chronics
+    if num_test_chronics is None:
+        # Use all chronics from test pool
+        test_scenarios = test_pool
+    elif len(test_pool) >= num_test_chronics:
+        # Randomly select subset from test pool
+        test_scenarios = sorted(random.sample(test_pool, num_test_chronics))
+    else:
+        # Test pool smaller than requested, use all
+        test_scenarios = test_pool
+        print(f"⚠️  Warning: Only {len(test_pool)} chronics available for testing (requested {num_test_chronics})")
     
     print(f"Total scenarios: {total_scenarios}")
-    print(f"Training scenarios: 0-{train_size-1} ({train_size} scenarios)")
-    print(f"Test scenarios: {train_size}-{total_scenarios-1} ({len(test_scenarios)} scenarios)")
+    print(f"Training pool: 0-{train_pool_size-1} ({train_pool_size} scenarios)")
+    print(f"Test pool: {train_pool_size}-{total_scenarios-1} ({len(test_pool)} scenarios)")
+    print(f"Test scenarios selected (seed={chronic_seed}): {len(test_scenarios)} chronics - {test_scenarios}")
     
     if max_episodes is None:
         print(f"Using all {len(test_scenarios)} test scenarios")
