@@ -381,12 +381,11 @@ def expand_node(node: MCTSNodeV2, action_catalog, action_idx: int,
             test_obs = env_copy.get_obs()
         except Exception as e:
             # Environment copy is in terminal/invalid state
-            if enable_debug:
-                print(f"[DEBUG] env.copy() returned terminal environment:")
-                print(f"  Error: {type(e).__name__}: {e}")
-                print(f"  Parent node.is_terminal: {node.is_terminal}")
-                print(f"  Parent node.env is not None: {node.env is not None}")
-                print(f"  This suggests parent env is in terminal state but is_terminal=False")
+            print(f"[DEBUG] env.copy() returned terminal environment:")
+            print(f"  Error: {type(e).__name__}: {e}")
+            print(f"  Parent node.is_terminal: {node.is_terminal}")
+            print(f"  Parent node.env is not None: {node.env is not None}")
+            print(f"  This suggests parent env is in terminal state but is_terminal=False")
             child = MCTSNodeV2(
                 env=None,
                 observation=None,
@@ -737,6 +736,7 @@ def run_simulation(root: MCTSNodeV2, action_catalog, c_puct: float = 1.0,
                 print(f"      → Descending to action {action_idx} (depth {depth} → {depth+1}, rho={child_rho:.3f})")
             node = node.children[action_idx]
             depth += 1
+            depth += 1
     
     # === 2. EXPANSION ===
     # If we stopped at an unexpanded action, expand it
@@ -757,7 +757,7 @@ def run_simulation(root: MCTSNodeV2, action_catalog, c_puct: float = 1.0,
     value = evaluate_node(node, value_fn)
     
     # Debug logging for tracked paths
-    if len(path_actions) > 0 and debug_action is not None and enable_debug:
+    if len(path_actions) > 0 and debug_action is not None:
         print(f"    [DEBUG] Path through action {debug_action}:")
         print(f"      Actions: {path_actions}")
         print(f"      Rewards: {[f'{r:.3f}' for r in path_rewards]}")
@@ -786,8 +786,7 @@ def run_mcts(env, observation, action_catalog, num_simulations: int,
              dirichlet_epsilon: float = 0.25,
              depth_bonus: float = 0.0,
              virtual_loss_weight: float = 0.0,
-             penalty_for_failure: float = -5.0,
-             enable_debug: bool = False) -> Tuple[MCTSNodeV2, Dict]:
+             penalty_for_failure: float = -5.0) -> Tuple[MCTSNodeV2, Dict]:
     """
     Run MCTS from current state with safe state skipping.
     
@@ -855,22 +854,12 @@ def run_mcts(env, observation, action_catalog, num_simulations: int,
     else:
         root.action_priors = {i: 1.0/n_actions for i in range(n_actions)}
     
-    if enable_debug:
-        print(f"[DEBUG] policy_fn is None: {policy_fn is None}")
-        print(f"[DEBUG] n_actions: {n_actions}, expected uniform prior: {1.0/n_actions}")
-        print(f"[DEBUG] Priors BEFORE Dirichlet: {list(root.action_priors.values())[:10]}")
-    
     # Add Dirichlet noise to root priors for exploration (AlphaZero technique)
     # dirichlet_alpha controls concentration (lower = more uniform noise)
     # dirichlet_epsilon controls mixing weight (higher = more exploration)
-    if enable_debug:
-        print(f"[DEBUG] dirichlet_epsilon = {dirichlet_epsilon}, adding noise = {dirichlet_epsilon > 0}")
-    if dirichlet_epsilon > 0:
-        noise = np.random.dirichlet([dirichlet_alpha] * n_actions)
-        for i in range(n_actions):
-            root.action_priors[i] = (1 - dirichlet_epsilon) * root.action_priors[i] + dirichlet_epsilon * noise[i]
-    if enable_debug:
-        print(f"[DEBUG] Sample priors: {list(root.action_priors.values())[:5]}")
+    noise = np.random.dirichlet([dirichlet_alpha] * n_actions)
+    for i in range(n_actions):
+        root.action_priors[i] = (1 - dirichlet_epsilon) * root.action_priors[i] + dirichlet_epsilon * noise[i]
     
     # Track recovery nodes for early stopping
     recovery_node_count = 0

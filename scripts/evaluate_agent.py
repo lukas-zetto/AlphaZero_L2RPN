@@ -14,6 +14,7 @@ from grid2op.Agent import DoNothingAgent
 # Add project root to path
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, project_root)
+sys.path.insert(0, os.path.join(project_root, 'src'))
 
 from src.agent.my_agent import MyCustomAgent
 from src.rewards.custom_reward import MyCustomReward
@@ -279,6 +280,12 @@ def compare_agents(env, scenarios=None, max_episodes=None):
     
     # Create both agents
     custom_config = {**AGENT_CONFIG, 'agent_type': 'custom'}
+    
+    # Override model_path from environment variable if set (for Optuna trials)
+    if 'MODEL_PATH' in os.environ:
+        custom_config['model_path'] = os.environ['MODEL_PATH']
+        print(f"📦 Using model from environment: {custom_config['model_path']}")
+    
     do_nothing_config = {**AGENT_CONFIG, 'agent_type': 'do_nothing'}
     
     custom_agent = create_agent(env, custom_config)

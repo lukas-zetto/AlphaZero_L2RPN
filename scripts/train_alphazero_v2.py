@@ -20,7 +20,7 @@ import warnings
 import traceback
 
 from actions.action_catalog import build_action_catalog
-from training.alphazero_mcts_v2 import run_mcts, select_action, MCTSNodeV2
+from training.alphazero_mcts_v2 import run_mcts, select_action, MCTSNodeV2, collect_all_tree_nodes, compute_heuristic_value
 from networks.neural_network import create_neural_network, encode_observation_simple, neural_network_forward, train_neural_network
 
 # Suppress warnings in parallel workers
@@ -115,6 +115,7 @@ def _parallel_episode_worker(args):
         overloaded_lines = []
         actions_taken = []
         critical_states_count = 0
+        cumulative_reward = 0.0
         
         while not done and step < max_steps:
             max_rho = np.max(obs.rho)
@@ -144,13 +145,18 @@ def _parallel_episode_worker(args):
                     gamma=config['gamma'],
                     max_depth=config['max_depth'],
                     epsilon=config.get('mcts_epsilon', 0.0),
-                    policy_fn=lambda o: neural_network_forward(neural_network, o, num_actions)[0],
-                    value_fn=lambda o: neural_network_forward(neural_network, o, num_actions)[1],
+                    policy_fn=None,  # Heuristic mode: uniform priors
+                    value_fn=None,   # Heuristic mode: use heuristic value function
                     critical_threshold=critical_threshold,
                     dirichlet_alpha=config.get('dirichlet_alpha', 0.3),
                     dirichlet_epsilon=config.get('dirichlet_epsilon', 0.25),
                     penalty_for_failure=config.get('penalty_for_failure', -5.0)
                 )
+                
+                # Track tree depth statistics for this episode
+                if 'tree_depths' not in locals():
+                    tree_depths = []
+                tree_depths.append(stats.get('max_depth', 0))
                 
                 # Select action (based on max_reachable_steps)
                 action_idx = select_action(root, temperature=0, epsilon=0.0)
@@ -170,11 +176,16 @@ def _parallel_episode_worker(args):
                                          for i in range(num_actions)])
                     
                     if max_reachable_values.max() > 0:
-                        # Apply temperature sharpening (lower temp = more peaked toward best action)
-                        # Shift to positive values to avoid issues with negative powers
-                        max_steps_shifted = max_reachable_values + 1  # Add 1 to avoid zero
-                        steps_powered = np.power(max_steps_shifted, 1.0/policy_temperature)
-                        mcts_policy = steps_powered / steps_powered.sum()
+                        if policy_temperature == 0:
+                            # Greedy: one-hot on action with max reachable steps
+                            mcts_policy = np.zeros(num_actions)
+                            mcts_policy[action_idx] = 1.0
+                        else:
+                            # Apply temperature sharpening (lower temp = more peaked toward best action)
+                            # Shift to positive values to avoid issues with negative powers
+                            max_steps_shifted = max_reachable_values + 1  # Add 1 to avoid zero
+                            steps_powered = np.power(max_steps_shifted, 1.0/policy_temperature)
+                            mcts_policy = steps_powered / steps_powered.sum()
                     else:
                         # Fallback if no valid actions
                         mcts_policy = np.zeros(num_actions)
@@ -185,12 +196,17 @@ def _parallel_episode_worker(args):
                     visits = np.array([root.children[i].visit_count if i in root.children else 0 
                                       for i in range(num_actions)])
                     if visits.sum() > 0:
-                        visits_powered = np.power(visits, 1.0/policy_temperature)
-                        # Add selection bias: boost the actually selected action (but not action 0 - do-nothing)
-                        if action_idx != 0:
-                            selection_bias = config.get('selection_bias_weight', 0.5)
-                            visits_powered[action_idx] *= (1.0 + selection_bias)
-                        mcts_policy = visits_powered / visits_powered.sum()
+                        if policy_temperature == 0:
+                            # Greedy: one-hot on selected action
+                            mcts_policy = np.zeros(num_actions)
+                            mcts_policy[action_idx] = 1.0
+                        else:
+                            visits_powered = np.power(visits, 1.0/policy_temperature)
+                            # Add selection bias: boost the actually selected action (but not action 0 - do-nothing)
+                            if action_idx != 0:
+                                selection_bias = config.get('selection_bias_weight', 0.5)
+                                visits_powered[action_idx] *= (1.0 + selection_bias)
+                            mcts_policy = visits_powered / visits_powered.sum()
                     else:
                         mcts_policy = np.ones(num_actions) / num_actions
                         
@@ -199,9 +215,14 @@ def _parallel_episode_worker(args):
                     visits = np.array([root.children[i].visit_count if i in root.children else 0 
                                       for i in range(num_actions)])
                     if visits.sum() > 0:
-                        # Apply temperature sharpening if specified
-                        visits_powered = np.power(visits, 1.0/policy_temperature)
-                        mcts_policy = visits_powered / visits_powered.sum()
+                        if policy_temperature == 0:
+                            # Greedy: one-hot on selected action
+                            mcts_policy = np.zeros(num_actions)
+                            mcts_policy[action_idx] = 1.0
+                        else:
+                            # Apply temperature sharpening if specified
+                            visits_powered = np.power(visits, 1.0/policy_temperature)
+                            mcts_policy = visits_powered / visits_powered.sum()
                     else:
                         mcts_policy = np.ones(num_actions) / num_actions
                 
@@ -218,6 +239,7 @@ def _parallel_episode_worker(args):
                 action = catalog.actions[action_idx]
                 grid2op_action = action.apply(env.action_space)
                 obs, reward, done, info = env.step(grid2op_action)
+                cumulative_reward += reward
                 step += 1
                 
                 # Track action result
@@ -240,14 +262,16 @@ def _parallel_episode_worker(args):
             else:
                 # Safe state - do nothing
                 obs, reward, done, info = env.step(env.action_space())
+                cumulative_reward += reward
                 step += 1
         
         env.close()
         
         # Print completion summary with statistics
+        avg_tree_depth = sum(tree_depths) / len(tree_depths) if 'tree_depths' in locals() and tree_depths else 0
         print(f"  [Worker {worker_id}] Completed: Chronic {chronic_id}", flush=True)
         print(f"    Steps: {step}, Critical states: {critical_states_count}, Training examples: {len(episode_data)}", flush=True)
-        print(f"    Max rho: {max_rho_seen:.3f}", flush=True)
+        print(f"    Total reward: {cumulative_reward:.2f}, Max rho: {max_rho_seen:.3f}, Avg tree depth: {avg_tree_depth:.1f}", flush=True)
         if overloaded_lines:
             print(f"    Peak overloaded lines (rho>1.0): {overloaded_lines[:5]}" + (" ..." if len(overloaded_lines) > 5 else ""), flush=True)
         if actions_taken:
@@ -379,14 +403,30 @@ class AlphaZeroTrainerV2:
         )
         return policy, value
     
-    def self_play_episode(self, episode_id):
-        """Run one self-play episode collecting training data."""
+    def self_play_episode(self, episode_id, enable_debug=False):
+        """Run one self-play episode collecting training data.
+        
+        Args:
+            episode_id: Episode number for logging
+            enable_debug: If True, enable verbose debug output in MCTS (default False for parallel mode)
+        """
         print(f"\n{'='*60}")
         print(f"SELF-PLAY EPISODE {episode_id}")
         print(f"{'='*60}")
         
         # Reset environment with next training chronic (cycle through ALL training chronics)
         chronic_id = self.train_chronics[self.current_chronic_idx % len(self.train_chronics)]
+        
+        # Re-shuffle training chronics at the start of each new cycle for variety
+        if self.current_chronic_idx > 0 and self.current_chronic_idx % len(self.train_chronics) == 0:
+            import random
+            import time
+            # Use current time as seed for randomization at each cycle
+            cycle_seed = int(time.time() * 1000) % (2**32)
+            random.seed(cycle_seed)
+            random.shuffle(self.train_chronics)
+            print(f"🔀 Starting new cycle - reshuffled training chronics with seed {cycle_seed}")
+        
         print(f"Using training chronic {chronic_id} ({self.current_chronic_idx + 1}/{len(self.train_chronics)} in cycle)")
         self.env.set_id(chronic_id)
         obs = self.env.reset()
@@ -396,6 +436,7 @@ class AlphaZeroTrainerV2:
         step = 0
         episode_data = []
         is_failure = False  # Track if episode ended due to failure
+        cumulative_reward = 0.0  # Track total episode reward
         
         while not done and step < self.config['max_episode_steps']:
             max_rho = np.max(obs.rho)
@@ -416,13 +457,16 @@ class AlphaZeroTrainerV2:
                         # For now, just apply it
                         print(f"  🔄 Grid is very safe (rho={max_rho:.3f} ≤ {reset_threshold}) - resetting to reference topology")
                         obs, reward, done, info = self.env.step(reset_action)
+                        cumulative_reward += reward
                     except Exception as e:
                         print(f"  ⚠️ Topology reset failed: {e}, using do-nothing")
                         obs, reward, done, info = self.env.step(self.env.action_space())
+                        cumulative_reward += reward
                 else:
                     print(f"  ⏭️ Skipping MCTS - grid is safe, taking do-nothing action")
                     # Take do-nothing action
                     obs, reward, done, info = self.env.step(self.env.action_space())
+                    cumulative_reward += reward
                 step += 1
                 continue
             
@@ -450,6 +494,44 @@ class AlphaZeroTrainerV2:
                 print(f"  ⚠️ Could not simulate do-nothing: {e}")
                 do_nothing_failed = True
             
+            # Determine value function based on value_target_method
+            value_method = self.config.get('value_target_method', 'mcts_root')
+            if value_method == 'heuristic':
+                # Use heuristic value function during MCTS search
+                from training.alphazero_mcts_v2 import compute_heuristic_value
+                from rewards.custom_reward import MyCustomReward
+                heuristic_reward_fn = MyCustomReward()
+                
+                def heuristic_value_fn(observation):
+                    # Compute actual reward for this observation
+                    actual_reward = heuristic_reward_fn(
+                        action=None,
+                        env=None,
+                        has_error=False,
+                        is_done=False,
+                        is_illegal=False,
+                        is_ambiguous=False,
+                        obs=observation
+                    )
+                    # Create temporary node with actual reward
+                    temp_node = MCTSNodeV2(
+                        env=None, 
+                        observation=observation,
+                        edge_reward=actual_reward  # Use actual reward based on state
+                    )
+                    return compute_heuristic_value(
+                        temp_node,
+                        gamma=self.config.get('gamma', 0.95),
+                        horizon=self.config.get('heuristic_value_horizon', 100)
+                    )
+                value_fn = heuristic_value_fn
+                # Use NN for policy priors (should be ~uniform at initialization)
+                policy_fn = lambda o: self.get_policy_value(o)[0]
+            else:
+                # Use neural network for both policy and value
+                policy_fn = lambda o: self.get_policy_value(o)[0]
+                value_fn = lambda o: self.get_policy_value(o)[1]
+            
             print(f"  Running MCTS with {self.config['mcts_simulations']} simulations (epsilon={epsilon}, threshold={critical_threshold})...")
             
             root, stats = run_mcts(
@@ -459,8 +541,8 @@ class AlphaZeroTrainerV2:
                 num_simulations=self.config['mcts_simulations'],
                 c_puct=self.config['c_puct'],  # Fixed: use 'c_puct' not 'puct_c'
                 gamma=self.config['gamma'],
-                policy_fn=lambda o: self.get_policy_value(o)[0],  # Use NN policy
-                value_fn=lambda o: self.get_policy_value(o)[1],  # Use NN value
+                policy_fn=policy_fn,  # NN policy for priors
+                value_fn=value_fn,    # Heuristic or NN value
                 max_depth=self.config['max_depth'],
                 epsilon=epsilon,
                 verbose=True,  # Enable to see pre-filter messages
@@ -472,7 +554,8 @@ class AlphaZeroTrainerV2:
                 prefilter_rho_increase=self.config.get('action_prefilter_rho_increase', 0.15),
                 dirichlet_alpha=self.config.get('dirichlet_alpha', 0.3),
                 dirichlet_epsilon=self.config.get('dirichlet_epsilon', 0.25),
-                penalty_for_failure=self.config.get('penalty_for_failure', -5.0)
+                penalty_for_failure=self.config.get('penalty_for_failure', -5.0),
+                enable_debug=enable_debug  # Only show debug in sequential mode
             )
             
             # Print tree statistics for debugging
@@ -548,11 +631,16 @@ class AlphaZeroTrainerV2:
                                      for i in range(self.num_actions)])
                 
                 if max_reachable_values.max() > 0:
-                    # Apply temperature sharpening (lower temp = more peaked toward best action)
-                    # Shift to positive values to avoid issues with negative powers
-                    max_steps_shifted = max_reachable_values + 1  # Add 1 to avoid zero
-                    steps_powered = np.power(max_steps_shifted, 1.0/policy_temperature)
-                    mcts_policy = steps_powered / steps_powered.sum()
+                    if policy_temperature == 0:
+                        # Greedy: one-hot on selected action
+                        mcts_policy = np.zeros(self.num_actions)
+                        mcts_policy[action_idx] = 1.0
+                    else:
+                        # Apply temperature sharpening (lower temp = more peaked toward best action)
+                        # Shift to positive values to avoid issues with negative powers
+                        max_steps_shifted = max_reachable_values + 1  # Add 1 to avoid zero
+                        steps_powered = np.power(max_steps_shifted, 1.0/policy_temperature)
+                        mcts_policy = steps_powered / steps_powered.sum()
                 else:
                     # Fallback if no valid actions
                     mcts_policy = np.zeros(self.num_actions)
@@ -573,8 +661,13 @@ class AlphaZeroTrainerV2:
             else:  # 'visits' or default
                 # Visit distribution: already computed above, just apply temperature
                 if total_visits > 0:
-                    visits_powered = np.power(visits, 1.0/policy_temperature)
-                    mcts_policy = visits_powered / visits_powered.sum()
+                    if policy_temperature == 0:
+                        # Greedy: one-hot on action with most visits
+                        mcts_policy = np.zeros(self.num_actions)
+                        mcts_policy[action_idx] = 1.0
+                    else:
+                        visits_powered = np.power(visits, 1.0/policy_temperature)
+                        mcts_policy = visits_powered / visits_powered.sum()
                 # else: mcts_policy already set to uniform above
             
             if action_idx in root.children:
@@ -585,24 +678,60 @@ class AlphaZeroTrainerV2:
             else:
                 print(f"  ✅ Selected action {action_idx} (default/fallback)")
             
-            # Store training example with either MCTS value or placeholder for binary outcome
-            state_vector = encode_observation_simple(obs)
+            # Store training examples based on value_target_method
+            value_method = self.config.get('value_target_method', 'mcts_root')
             
-            if self.config.get('use_mcts_values', True):
-                # Use MCTS Q-values (AlphaZero approach)
-                root_value = root.value()  # Average Q-value from all MCTS simulations
+            if value_method == 'mcts_root':
+                # Original: Use MCTS Q-value from root node only
+                state_vector = encode_observation_simple(obs)
+                root_value = root.value()
                 episode_data.append({
                     'state': state_vector,
                     'policy': mcts_policy,
-                    'value': root_value,  # MCTS value estimate
+                    'value': root_value,
+                    'source': 'mcts_root'
                 })
+                
+            elif value_method == 'binary_root':
+                # Original: Use binary outcome from root node only (set after episode)
+                state_vector = encode_observation_simple(obs)
+                episode_data.append({
+                    'state': state_vector,
+                    'policy': mcts_policy,
+                    'value': 0.0,  # Placeholder - updated after episode
+                    'source': 'binary_root'
+                })
+                
+            elif value_method == 'mcts_all_nodes':
+                # Use MCTS Q-values from ALL tree nodes
+                all_nodes_data = collect_all_tree_nodes(root, encode_observation_simple)
+                episode_data.extend(all_nodes_data)
+                print(f"  📦 Collected {len(all_nodes_data)} nodes from MCTS tree (depths 0-{max([d['depth'] for d in all_nodes_data])})")
+                
+            elif value_method == 'binary_all_nodes':
+                # PROPER ALPHAZERO: Collect ALL tree nodes, label with final episode outcome
+                # This is how AlphaZero actually works (Go/Chess/Shogi)
+                all_nodes_data = collect_all_tree_nodes(root, encode_observation_simple)
+                # Set placeholder values (will be updated after episode completes)
+                for data in all_nodes_data:
+                    data['value'] = 0.0  # Placeholder
+                    data['source'] = 'binary_all_nodes'
+                episode_data.extend(all_nodes_data)
+                print(f"  📦 Collected {len(all_nodes_data)} nodes from MCTS tree (depths 0-{max([d['depth'] for d in all_nodes_data])}), will label with episode outcome")
+                
+            elif value_method == 'heuristic':
+                # Heuristic mode: Only train policy, not value
+                # Value is computed via heuristic formula, not learned
+                state_vector = encode_observation_simple(obs)
+                episode_data.append({
+                    'state': state_vector,
+                    'policy': mcts_policy,
+                    'value': None,  # No value target - we don't train value network
+                    'source': 'heuristic'
+                })
+                print(f"  📦 Collected root for policy training (heuristic mode - no value training)")
             else:
-                # Use binary episode outcomes (will be set after episode completes)
-                episode_data.append({
-                    'state': state_vector,
-                    'policy': mcts_policy,
-                    'value': 0.0,  # Placeholder - will be updated with episode outcome
-                })
+                raise ValueError(f"Unknown value_target_method: {value_method}")
             
             # Get line loads before action
             rho_before = obs.rho.copy()
@@ -615,6 +744,7 @@ class AlphaZeroTrainerV2:
             print(f"  📋 Action {action_idx}: {str(action)[:80]}")
             
             obs, reward, done, info = self.env.step(grid2op_action)
+            cumulative_reward += reward
             step += 1
             
             # Show line load changes
@@ -664,24 +794,54 @@ class AlphaZeroTrainerV2:
                     print(f"\n  ✅ Episode completed naturally at step {step}")
                 break
         
-        # Episode complete - assign final values based on configuration
-        if not self.config.get('use_mcts_values', True) and len(episode_data) > 0:
-            # Binary episode outcome assignment: +1 for success, -1 for failure
+        # Episode complete - assign final values based on value_target_method
+        value_method = self.config.get('value_target_method', 'mcts_root')
+        
+        if value_method == 'binary_root' and len(episode_data) > 0:
+            # Binary episode outcome assignment: +1 for success, -1 for failure (root only)
             episode_outcome = 1.0 if not is_failure else -1.0
             for data in episode_data:
-                data['value'] = episode_outcome
-            print(f"  📊 Assigned binary values: {episode_outcome} to all {len(episode_data)} states")
+                if data.get('source') == 'binary_root':  # Only update placeholders
+                    data['value'] = episode_outcome
+            print(f"  📊 Assigned binary outcome: {episode_outcome} to all {len(episode_data)} root states")
+            
+        elif value_method == 'binary_all_nodes' and len(episode_data) > 0:
+            # PROPER ALPHAZERO: Binary outcome for ALL nodes in MCTS trees
+            episode_outcome = 1.0 if not is_failure else -1.0
+            for data in episode_data:
+                if data.get('source') == 'binary_all_nodes':  # Only update placeholders
+                    data['value'] = episode_outcome
+            print(f"  📊 Assigned binary outcome: {episode_outcome} to all {len(episode_data)} tree nodes (AlphaZero style)")
+        
+        # Determine method name for logging
+        method_names = {
+            'mcts_root': 'MCTS Q-values (root only)',
+            'binary_root': 'Binary outcomes (root only)',
+            'mcts_all_nodes': 'MCTS Q-values (all tree nodes)',
+            'binary_all_nodes': 'Binary outcomes (all nodes) - PROPER ALPHAZERO',
+            'heuristic': 'Heuristic value function'
+        }
+        method_name = method_names.get(value_method, value_method)
         
         print(f"\n✅ Episode Summary:")
         print(f"  Steps: {step}/{self.config['max_episode_steps']}")
-        print(f"  MCTS states collected: {len(episode_data)}")
+        print(f"  Total reward: {cumulative_reward:.2f}")
+        print(f"  Training samples collected: {len(episode_data)}")
         print(f"  Success: {'Yes' if not is_failure else 'No'}")
-        print(f"  Value assignment: {'MCTS Q-values' if self.config.get('use_mcts_values', True) else 'Binary outcomes'}")
+        print(f"  Value assignment: {method_name}")
         
         if len(episode_data) > 0:
-            # Show value distribution
-            values = [data['value'] for data in episode_data]
-            print(f"  Value range: [{min(values):.3f}, {max(values):.3f}], mean={np.mean(values):.3f}")
+            # Show value distribution (skip None values for heuristic mode)
+            values = [data['value'] for data in episode_data if data['value'] is not None]
+            if len(values) > 0:
+                print(f"  Value range: [{min(values):.3f}, {max(values):.3f}], mean={np.mean(values):.3f}")
+            
+            # Show depth distribution if using all nodes
+            if 'depth' in episode_data[0]:
+                depths = [data['depth'] for data in episode_data]
+                from collections import Counter
+                depth_counts = Counter(depths)
+                print(f"  Samples by depth: {dict(sorted(depth_counts.items()))}")
         
         # Store ENTIRE EPISODE as a unit in replay buffer (always store for collection)
         # We'll decide whether to use it for multi-iteration training based on use_replay_buffer flag
@@ -745,14 +905,20 @@ class AlphaZeroTrainerV2:
         )
         
         # Log value statistics for debugging
-        value_targets = [ex['value'] for ex in training_examples]
-        value_min, value_max, value_mean = np.min(value_targets), np.max(value_targets), np.mean(value_targets)
+        value_targets = [ex['value'] for ex in training_examples if ex['value'] is not None]
+        if len(value_targets) > 0:
+            value_min, value_max, value_mean = np.min(value_targets), np.max(value_targets), np.mean(value_targets)
+        else:
+            value_min, value_max, value_mean = 0, 0, 0
         
         print(f"Training losses:")
         print(f"  Policy loss: {loss_info['policy_loss']:.4f}")
         print(f"  Value loss: {loss_info['value_loss']:.4f}")
         print(f"  Total loss: {loss_info['total_loss']:.4f}")
-        print(f"  Value targets - min: {value_min:.3f}, max: {value_max:.3f}, mean: {value_mean:.3f}")
+        if len(value_targets) > 0:
+            print(f"  Value targets - min: {value_min:.3f}, max: {value_max:.3f}, mean: {value_mean:.3f}")
+        else:
+            print(f"  Value targets - (none, using heuristic mode)")
         return loss_info
     
     def decay_learning_rate(self):
@@ -892,7 +1058,7 @@ class AlphaZeroTrainerV2:
             else:
                 # SEQUENTIAL COLLECTION (original behavior)  
                 for episode in range(self.config['episodes_per_iteration']):
-                    episode_len, episode_value = self.self_play_episode(episode)
+                    episode_len, episode_value = self.self_play_episode(episode, enable_debug=True)
                     # Collect all episode data if not using replay buffer
                     if not self.use_replay_buffer:
                         # Get the last episode from replay buffer (the episode we just played)
@@ -908,7 +1074,13 @@ class AlphaZeroTrainerV2:
             
             # Save checkpoint
             if (iteration + 1) % self.config['save_every'] == 0:
-                checkpoint_path = f"/workspace/checkpoints/alphazero_v2_iter{iteration+1}.pt"
+                # Use CHECKPOINT_DIR from environment if set, otherwise use method-specific directory
+                if 'CHECKPOINT_DIR' in os.environ:
+                    checkpoint_dir = f"/workspace/{os.environ['CHECKPOINT_DIR']}"
+                else:
+                    value_method = self.config.get('value_target_method', 'default')
+                    checkpoint_dir = f"/workspace/checkpoints_{value_method}" if value_method != 'default' else "/workspace/checkpoints"
+                checkpoint_path = f"{checkpoint_dir}/alphazero_v2_iter{iteration+1}.pt"
                 os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
                 torch.save({
                     'iteration': iteration + 1,
@@ -927,6 +1099,18 @@ class AlphaZeroTrainerV2:
 
 
 def main():
+    # Parse command-line arguments
+    import argparse
+    parser = argparse.ArgumentParser(description='Train AlphaZero agent')
+    parser.add_argument('--method', type=str, default='mcts_all_nodes',
+                       choices=['heuristic', 'mcts_root', 'mcts_all_nodes', 'binary_root', 'binary_all_nodes'],
+                       help='Value function method')
+    parser.add_argument('--num_iterations', type=int, default=None,
+                       help='Total number of training iterations (overrides calculation)')
+    parser.add_argument('--episodes_per_iteration', type=int, default=None,
+                       help='Episodes per iteration (overrides config)')
+    args = parser.parse_args()
+    
     # Set random seeds for reproducibility
     import random
     seed = 42
@@ -980,12 +1164,27 @@ def main():
     # Load training configuration from config.py
     from config import AGENT_CONFIG, TRAINING_CONFIG
     
-    # Override config with environment variables (for Optuna trials)
+    # Override episodes_per_iteration from command-line if provided
+    if args.episodes_per_iteration is not None:
+        AGENT_CONFIG['episodes_per_iteration'] = args.episodes_per_iteration
+    
+    # Override value_function_method from command-line
+    AGENT_CONFIG['value_function_method'] = args.method
+    
+    # Override config with environment variables (for Optuna trials or comparison)
     def get_config_value(key, default):
         """Get config value from environment variable or default"""
-        env_key = f'OPTUNA_{key.upper()}'
-        if env_key in os.environ:
-            value = os.environ[env_key]
+        # Check both OPTUNA_ and direct env var names
+        env_key_optuna = f'OPTUNA_{key.upper()}'
+        env_key_direct = key.upper()
+        
+        value = None
+        if env_key_optuna in os.environ:
+            value = os.environ[env_key_optuna]
+        elif env_key_direct in os.environ:
+            value = os.environ[env_key_direct]
+        
+        if value is not None:
             # Parse value type
             if value.lower() in ('true', 'false'):
                 return value.lower() == 'true'
@@ -1030,6 +1229,9 @@ def main():
         # Temperature decay
         'temperature_decay': get_config_value('temperature_decay', AGENT_CONFIG.get('temperature_decay', 0.95)),
 
+        # Value target method (for comparison trials)
+        'value_target_method': get_config_value('value_target_method', AGENT_CONFIG.get('value_target_method', 'mcts_root')),
+        'heuristic_value_horizon': get_config_value('heuristic_value_horizon', AGENT_CONFIG.get('heuristic_value_horizon', 100)),
 
         # Training parameters
         'episodes_per_iteration': get_config_value('episodes_per_iteration', AGENT_CONFIG['episodes_per_iteration']),
@@ -1074,6 +1276,10 @@ def main():
     # Calculate total iterations: (num_cycles * train_chronics) / episodes_per_iteration
     num_train_chronics = len(trainer.train_chronics)
     total_iterations = (num_cycles * num_train_chronics) // episodes_per_iteration
+    
+    # Override with command-line argument if provided
+    if args.num_iterations is not None:
+        total_iterations = args.num_iterations
     
     # Apply max_training_iterations limit if set via environment variable
     max_training_iterations = get_config_value('max_training_iterations', None)

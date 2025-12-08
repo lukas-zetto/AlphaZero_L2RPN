@@ -224,11 +224,22 @@ def train_neural_network(neural_network, training_examples, config, optimizer=No
     states = []
     mcts_policies = []
     values = []
+    has_value_targets = True  # Track if we're training value network
     
     for example in training_examples:
         states.append(example['state'])
         mcts_policies.append(example['mcts_policy'])
-        values.append(example['value'])
+        # Check if value is None (heuristic mode - policy-only training)
+        if example['value'] is None:
+            values.append(0.0)  # Placeholder, will be ignored
+            has_value_targets = False
+        else:
+            values.append(example['value'])
+    
+    # Override value_weight to 0 if no value targets (heuristic mode)
+    if not has_value_targets:
+        value_weight = 0.0
+        print("  [Heuristic mode] Training policy only, value network frozen")
     
     # Ensure proper dtypes - states and policies should already be np.float32 arrays
     # All policies are exactly 21 elements (fixed-size action space)
@@ -259,6 +270,10 @@ def train_neural_network(neural_network, training_examples, config, optimizer=No
         epoch_value_loss = 0.0
         
         for batch_states, batch_policies, batch_values in dataloader:
+            # Skip batches with size 1 to avoid BatchNorm error
+            if batch_states.size(0) == 1:
+                continue
+                
             # Forward pass
             policy_logits, predicted_values = neural_network(batch_states)
             
@@ -335,22 +350,27 @@ def train_neural_network(neural_network, training_examples, config, optimizer=No
 
 class ResidualBlock(nn.Module):
     """
-    Residual block with skip connection for deeper networks.
-    Architecture: Linear -> ReLU -> Dropout -> Linear -> Add residual -> ReLU
+    Residual block with skip connection and batch normalization.
+    Architecture: Linear -> BatchNorm -> ReLU -> Linear -> BatchNorm -> Add residual -> ReLU
     """
-    def __init__(self, hidden_size, dropout=0.1):
+    def __init__(self, hidden_size, dropout=0.0):
         super(ResidualBlock, self).__init__()
         self.fc1 = nn.Linear(hidden_size, hidden_size)
+        self.bn1 = nn.BatchNorm1d(hidden_size)
         self.fc2 = nn.Linear(hidden_size, hidden_size)
-        self.dropout = nn.Dropout(dropout)
+        self.bn2 = nn.BatchNorm1d(hidden_size)
+        self.dropout = nn.Dropout(dropout) if dropout > 0 else None
         self.relu = nn.ReLU()
     
     def forward(self, x):
         residual = x
         out = self.fc1(x)
+        out = self.bn1(out)
         out = self.relu(out)
-        out = self.dropout(out)
+        if self.dropout is not None:
+            out = self.dropout(out)
         out = self.fc2(out)
+        out = self.bn2(out)
         out = out + residual  # Skip connection
         out = self.relu(out)
         return out
@@ -376,28 +396,39 @@ class AlphaZeroNetwork(nn.Module, NeuralNetworkInterface):
         self.num_actions = num_actions
         self.hidden_size = hidden_size
         
-        # Initial projection layer
+        # Input normalization (stabilize training)
+        self.input_norm = nn.LayerNorm(input_size)
+        
+        # Initial projection layer with batch norm
         self.input_layer = nn.Sequential(
             nn.Linear(input_size, hidden_size),
-            nn.ReLU(),
-            nn.Dropout(0.1)
+            nn.BatchNorm1d(hidden_size),
+            nn.ReLU()
         )
         
-        # Residual trunk (3 blocks instead of 6 - smaller network for limited data)
+        # Residual trunk (6 blocks for better capacity)
         self.residual_blocks = nn.Sequential(
-            ResidualBlock(hidden_size, dropout=0.1),
-            ResidualBlock(hidden_size, dropout=0.1),
-            ResidualBlock(hidden_size, dropout=0.1)
+            ResidualBlock(hidden_size),
+            ResidualBlock(hidden_size),
+            ResidualBlock(hidden_size),
+            ResidualBlock(hidden_size),
+            ResidualBlock(hidden_size),
+            ResidualBlock(hidden_size)
         )
         
         # Policy head (action probabilities)  
-        self.policy_head = nn.Linear(hidden_size, num_actions)
+        self.policy_head = nn.Sequential(
+            nn.Linear(hidden_size, num_actions)
+        )
         
-        # Value head (state value estimate)
+        # Value head (state value estimate) - larger capacity
         self.value_head = nn.Sequential(
-            nn.Linear(hidden_size, 128),
+            nn.Linear(hidden_size, 256),
+            nn.BatchNorm1d(256),
             nn.ReLU(),
-            nn.Dropout(0.1),
+            nn.Linear(256, 128),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
             nn.Linear(128, 1)
             # No activation - linear output for unbounded cumulative reward prediction
         )
@@ -405,14 +436,23 @@ class AlphaZeroNetwork(nn.Module, NeuralNetworkInterface):
         # Initialize weights
         self._initialize_weights()
         
-        print(f"AlphaZero network created: {input_size} -> projection({hidden_size}) -> 3x residual blocks -> policy({num_actions}) + value(1)")
+        print(f"AlphaZero network created: {input_size} -> projection({hidden_size}) -> 6x residual blocks -> policy({num_actions}) + value(1)")
         print(f"  Total parameters: ~{self._count_parameters():,}")
+        print(f"  Architecture: Wider ({hidden_size}), deeper (6 blocks), BatchNorm, no dropout")
     
     def _initialize_weights(self):
         """Initialize network weights using Xavier initialization"""
         for module in self.modules():
             if isinstance(module, nn.Linear):
                 nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+        
+        # Initialize policy head final layer to zeros for uniform priors at start
+        # When all logits are 0, softmax gives uniform distribution
+        for module in self.policy_head.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.zeros_(module.weight)
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
     

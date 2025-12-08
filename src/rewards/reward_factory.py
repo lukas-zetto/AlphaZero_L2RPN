@@ -9,11 +9,11 @@ import importlib
 # Reward mapping configuration
 REWARD_MAPPINGS = {
     'AlphaZero': {
-        'module': 'src.rewards.custom_reward',
+        'module': 'rewards.custom_reward',
         'class': 'MyCustomReward'
     },
     'D3QN-2022': {
-        'module': 'src.rewards.d3qn_reward',
+        'module': 'rewards.d3qn_reward',
         'class': 'D3QNSurvivalReward'
     },
     # Add more reward mappings here as needed

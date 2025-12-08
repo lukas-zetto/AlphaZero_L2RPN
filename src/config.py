@@ -20,7 +20,7 @@ AGENT_CONFIG = {
     
     # Safety parameters  
     'intervention_threshold': 0.95,  # Agent acts when max_rho > 95% (evaluation - match training threshold)
-    'critical_threshold': 0.95,      # MCTS training when max_rho > 95% (training - balanced difficulty)
+    'critical_threshold': 0.98,      # MCTS training when max_rho > 98% (training - less frequent MCTS)
     # Simple logic: Act whenever rho > 95% to match training behavior
     
     # Memory parameters
@@ -37,26 +37,32 @@ AGENT_CONFIG = {
     'max_training_chronics': None,  #
     
     # Value assignment method
-    'use_mcts_values': True,  # True: use MCTS Q-values, False: use binary episode outcomes (+1/-1)
+    'value_target_method': 'heuristic',  # Options:
+        # 'mcts_root': Use MCTS Q-values from root node only
+        # 'binary_root': Use binary episode outcomes for root node only (+1/-1)
+        # 'mcts_all_nodes': Use MCTS Q-values from ALL tree nodes (50-200x more training data)
+        # 'binary_all_nodes': Use binary outcomes for ALL tree nodes (PROPER ALPHAZERO like Go/Chess)
+        # 'heuristic': Use heuristic value function (discounted future rewards from current state)
+    'heuristic_value_horizon': 10,  # Reduced from 20 to minimize do-nothing bias
 
     # MCTS parameters
-    'mcts_simulations': 1000,  # Number of MCTS simulations per critical state
+    'mcts_simulations': 300,  # Number of MCTS simulations per critical state
     'max_depth': 25,  # Limit tree depth to 25 levels
-    'puct_c': 2.0,  # Higher exploration constant to prevent action collapse
-    'mcts_epsilon': 0.0,  # No random exploration during MCTS (Dirichlet handles root)
-    'temperature': 2.0,  # Start with high temperature for exploration (will decay)
-    'temperature_decay': 0.95,  # Decay temperature by 5% each iteration
-    'min_temperature': 0.1,  # Minimum temperature (nearly greedy but not fully)
-    't_skipped': 50,  # Number of skipped safe states to be considered recovery node
-    't_stopping': 20,  # Stop MCTS early if this many recovery nodes found (good actions exist)
-    'action_prefilter_rho_increase': 0.20,  # RELAXED: Allow more actions (was 0.10)
+    'puct_c': 3.0,  # Increased to 3.0 for more exploration to overcome heuristic do-nothing bias
+    'mcts_epsilon': 0.0,  # No random exploration during MCTS
+    'temperature': 1.0,  # No sharpening - use raw visit counts (1.0 = no temperature effect)
+    'temperature_decay': 1.0,  # Decay temperature by 5% each iteration
+    'min_temperature': 1.0,  # Minimum temperature (keep at 1.0 for no sharpening)
+    't_skipped': 200,  # Number of skipped safe states to be considered recovery node
+    't_stopping': 50,  # Stop MCTS early if this many recovery nodes found (good actions exist)
+    'action_prefilter_rho_increase': 0.10,  # RELAXED: Allow more actions (was 0.10)
     
     # PUCT modifications for exploration
     'use_depth_bonus': False,  # Add bonus for unexpanded/leaf nodes to encourage deeper exploration
     'depth_bonus': 0.05,  # Magnitude of depth bonus (only used if use_depth_bonus=True)
     'use_virtual_loss': False,  # Penalize frequently visited nodes to encourage wider trees
     'virtual_loss_weight': 0.5,  # Magnitude of virtual loss penalty (only used if use_virtual_loss=True)
-    'penalty_for_failure': -5.0,  # Penalty reward for failed episodes (negative value)
+    'penalty_for_failure': 0.0,  # Penalty reward for failed episodes (negative value)
     
     # Policy target method
     'policy_target_method': 'visits',  # 'one_hot' = one-hot on selected action, 'visits' = visit count distribution, 'max_steps' = distribution based on max_reachable_steps, 'visits_with_selection_bias' = visits + boost selected action
@@ -64,25 +70,25 @@ AGENT_CONFIG = {
     'selection_bias_weight': 0.0,  # Set to 0 to prevent action collapse
     
     # Dirichlet noise for exploration (AlphaZero technique)
-    'dirichlet_alpha': 0.3,    # Standard value: generates somewhat uniform noise
-    'dirichlet_epsilon': 0.25,  # 50% network policy + 50% noise for strong exploration (was 0.4)
+    'dirichlet_alpha': 0.3,    # Chess/Shogi value (0.03 for Go, 0.3 for Chess/Shogi)
+    'dirichlet_epsilon': 0.25,  # Standard AlphaZero: 25% noise, 75% policy
 
     # Neural network parameters
-    'hidden_size': 64,  # Smaller network to reduce overfitting
+    'hidden_size': 256,  # Larger network for better capacity (enliteAI used 512 for larger grids)
     'neural_network_implementation': 'v1',  # Use stable implementation
     
     # Model training parameters
-    'num_cycles': 1,  # For optimization: 1 cycle is enough for quick evaluation
-    'episodes_per_iteration': 6,  # Reduced for faster iterations during debugging
-    'parallel_workers': 6,  # Number of parallel workers for episode collection (0 = sequential, >0 = parallel)
-    'training_epochs': 1,  # Reduced from 10 to prevent overfitting/memorization
+    'num_cycles': 10,  # 10 cycles through all training chronics
+    'episodes_per_iteration': 903,  # Full cycle = 903 chronics (train after each complete cycle)
+    'parallel_workers': 14,  # 14 parallel workers for faster training
+    'training_epochs': 10,  # More epochs since we train less frequently (once per cycle)
     'weight_decay': 0.0001,  # Standard L2 regularization
-    'policy_weight': 3.0,  # Balanced loss weighting
+    'policy_weight': 1.0,  # Balanced loss weighting
     'value_weight': 1.0,   # Equal importance for policy and value
     'input_size': 83,  # Extended encoding: 60 line features + 23 bus topology bits
     # Experience replay toggle
-    'use_replay_buffer': True,  # Re-enabled with size 1 to avoid training skip bug
-    'replay_buffer_size': 60,  # 10 iterations worth (6 episodes/iteration) to keep recent diverse data
+    'use_replay_buffer': True,  # Maintain experience diversity across iterations
+    'replay_buffer_size': 1806,  # 2 full cycles worth (2*903) for stable diverse training
         # Input encoding breakdown:
         # - Line loads (rho): 20 bits [0:20]
         # - Line status: 20 bits [20:40] 
@@ -112,7 +118,7 @@ AGENT_CONFIG = {
     'curtailment_penalty': 0.1,
     
     # Model saving
-    'model_path': 'checkpoints/alphazero_v2_iter10.pt',  # Path to save/load trained model - use the latest trained model
+    'model_path': 'checkpoints_heuristic/alphazero_v2_iter4.pt',  # Path to save/load trained model - use the latest trained model
 }
 
 # Reduced action space configuration
@@ -174,7 +180,7 @@ TRAINING_CONFIG = {
     'early_stopping_patience': 200,
     
     # Chronic selection configuration
-    'chronic_seed': 42,  # Seed for deterministic chronic selection (set None for random)
+    'chronic_seed': 123,  # Seed for deterministic chronic selection (set None for random)
     'train_test_split': 0.9,  # 90% of chronics for training, 10% for test pool
     'num_test_chronics': None,  # Number of chronics to randomly select from test pool (None = use all test chronics)
 }
