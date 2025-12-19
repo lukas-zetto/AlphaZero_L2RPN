@@ -97,3 +97,6 @@ results/
 experiments/
 outputs/
 evaluations/
+
+# Training data
+training_data_samples/
