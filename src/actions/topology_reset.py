@@ -206,17 +206,22 @@ def get_reference_topology_action(observation, action_space):
     if len(modified_subs) == 0:
         return action
     
-    # For each modified substation, create action to reset to bus 1
+    # Build list of all substations to reset
+    all_subs_to_reset = []
     for sub_id in modified_subs:
         try:
             sub_topo = observation.state_of(substation_id=sub_id)
             n_elements = len(sub_topo['topo_vect'])
             
-            # Set all elements to bus 1
-            action.set_bus = {
-                'substations_id': [(sub_id, [1] * n_elements)]
-            }
+            # Add to list: set all elements to bus 1
+            all_subs_to_reset.append((sub_id, [1] * n_elements))
         except:
             continue
+    
+    # Set all substations at once (not one at a time)
+    if len(all_subs_to_reset) > 0:
+        action.set_bus = {
+            'substations_id': all_subs_to_reset
+        }
     
     return action

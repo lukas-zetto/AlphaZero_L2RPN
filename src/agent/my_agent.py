@@ -76,7 +76,7 @@ class MyCustomAgent(BaseAgent):
                 env = grid2op.make("l2rpn_case14_sandbox")
             self._baseline_env = env
 
-            subs = self.actions_config.get('substations', [3,4,5,8])
+            subs = self.actions_config.get('substations', list(range(14)))
             reduction = self.actions_config.get('reduction', 'N1')
             drop_identity = self.actions_config.get('drop_identity', True)
             

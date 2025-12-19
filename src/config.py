@@ -11,15 +11,15 @@ AGENT_CONFIG = {
     'compare_with_baseline': True,  # Set to True to compare custom agent vs do nothing agent
     
     # Learning parameters
-    'learning_rate': 0.0005,  # 
+        'learning_rate': 0.000005,  # Conservative, stable learning
     'learning_rate_decay': 0.98,  # Decay LR by 10% per iteration  
-    'min_learning_rate': 0.000005,  # Minimum learning rate floor
+    'min_learning_rate': 0.0000005,  # Minimum learning rate floor
     'exploration_rate': 0.0,  # Lower exploration - policy already learned good actions
     'exploration_decay': 0.999,  # Gradual decay over training
     'min_exploration_rate': 0.00,  # Small minimum to maintain some exploration
     
     # Safety parameters  
-    'intervention_threshold': 0.95,  # Agent acts when max_rho > 95% (evaluation - match training threshold)
+    'intervention_threshold': 0.98,  # Agent acts when max_rho > 95% (evaluation - match training threshold)
     'critical_threshold': 0.98,      # MCTS training when max_rho > 98% (training - less frequent MCTS)
     # Simple logic: Act whenever rho > 95% to match training behavior
     
@@ -43,12 +43,17 @@ AGENT_CONFIG = {
         # 'mcts_all_nodes': Use MCTS Q-values from ALL tree nodes (50-200x more training data)
         # 'binary_all_nodes': Use binary outcomes for ALL tree nodes (PROPER ALPHAZERO like Go/Chess)
         # 'heuristic': Use heuristic value function (discounted future rewards from current state)
-    'heuristic_value_horizon': 10,  # Reduced from 20 to minimize do-nothing bias
+    'heuristic_value_horizon': 30,  # Set from trial_params.json
 
     # MCTS parameters
-    'mcts_simulations': 300,  # Number of MCTS simulations per critical state
+    'mcts_simulations': 400,  # Increased for better policy quality
     'max_depth': 25,  # Limit tree depth to 25 levels
-    'puct_c': 3.0,  # Increased to 3.0 for more exploration to overcome heuristic do-nothing bias
+    
+    # Training data logging
+    'save_training_data': True,  # Save training batches to disk for analysis
+    'training_data_dir': 'training_data_samples',  # Directory to save data
+    'puct_c': 1.624074561769746,  # Set from trial_params.json
+    'heuristic_value_horizon': 27,  # Optimized horizon for heuristic value estimation
     'mcts_epsilon': 0.0,  # No random exploration during MCTS
     'temperature': 1.0,  # No sharpening - use raw visit counts (1.0 = no temperature effect)
     'temperature_decay': 1.0,  # Decay temperature by 5% each iteration
@@ -70,42 +75,43 @@ AGENT_CONFIG = {
     'selection_bias_weight': 0.0,  # Set to 0 to prevent action collapse
     
     # Dirichlet noise for exploration (AlphaZero technique)
-    'dirichlet_alpha': 0.3,    # Chess/Shogi value (0.03 for Go, 0.3 for Chess/Shogi)
-    'dirichlet_epsilon': 0.25,  # Standard AlphaZero: 25% noise, 75% policy
+    'dirichlet_alpha': 0.15227525095137953,    # Set from trial_params.json
+    'dirichlet_epsilon': 0.05,  # Optimized value from best_hyperparameters_cycle.json
 
     # Neural network parameters
     'hidden_size': 256,  # Larger network for better capacity (enliteAI used 512 for larger grids)
     'neural_network_implementation': 'v1',  # Use stable implementation
+    'num_workers': 15,  # Number of parallel workers for training
     
     # Model training parameters
-    'num_cycles': 10,  # 10 cycles through all training chronics
-    'episodes_per_iteration': 903,  # Full cycle = 903 chronics (train after each complete cycle)
-    'parallel_workers': 14,  # 14 parallel workers for faster training
-    'training_epochs': 10,  # More epochs since we train less frequently (once per cycle)
+    'num_cycles': 50,  # 10 cycles through all training chronics
+    'episodes_per_iteration': 903,  # Full cycle through all training chronics
+    'episodes_per_iteration_after_buffer_full': 301,  # Train 3x more often once buffer is full
+    'parallel_workers': 15,  # 14 parallel workers for faster training
+    'training_epochs': 5,  # Increased for better convergence per iteration
     'weight_decay': 0.0001,  # Standard L2 regularization
     'policy_weight': 1.0,  # Balanced loss weighting
     'value_weight': 1.0,   # Equal importance for policy and value
-    'input_size': 83,  # Extended encoding: 60 line features + 23 bus topology bits
+    'input_size': 117,  # Extended encoding: 60 line features + 57 bus topology bits (all 14 subs)
     # Experience replay toggle
     'use_replay_buffer': True,  # Maintain experience diversity across iterations
-    'replay_buffer_size': 1806,  # 2 full cycles worth (2*903) for stable diverse training
+    'replay_buffer_min_size': 903,  # Min episodes before training starts
+    'replay_buffer_size': 3612,  # 4 full cycles (4*903) FIFO
+    'train_every': 300,  # Train every 300 episodes after buffer is full
         # Input encoding breakdown:
         # - Line loads (rho): 20 bits [0:20]
         # - Line status: 20 bits [20:40] 
         # - Line cooldowns: 20 bits [40:60]
-        # - Bus topology (subs 3,4,5,8): 23 bits [60:83]
-        #   * Sub 3: 6 bits (3 line_or + 2 line_ex + 1 load)
-        #   * Sub 4: 5 bits (1 line_or + 3 line_ex + 1 load)
-        #   * Sub 5: 7 bits (3 line_or + 1 line_ex + 2 gen + 1 load)  
-        #   * Sub 8: 5 bits (3 line_or + 1 line_ex + 1 load)
+        # - Bus topology (ALL 14 subs): 57 bits [60:117]
+        #   * All topology vector elements from all substations
         # Action space
-    'max_actions': 61,  # Number of possible actions (60 catalog actions + 1 do-nothing)
+    'max_actions': 82,  # Number of possible actions (all 14 substations + do-nothing)
     
     # Recovery parameters
-    'recovery_score_norm': 100.0,  # Normalization factor for recovery_score
+     'heuristic_value_horizon': 27,  # Set from trial_params.json (Optuna trial 1)
     # critical_threshold is defined above in Safety parameters (0.95)
     
-    # Line reconnection parameters
+     'mcts_simulations': 350,  # Optuna trial 1
     'auto_reconnect': True,  # Automatically try to reconnect disconnected lines after topology actions
     'max_reconnections_per_action': 1,  # Number of lines to reconnect per MCTS action (1 = safest)
     
@@ -118,7 +124,7 @@ AGENT_CONFIG = {
     'curtailment_penalty': 0.1,
     
     # Model saving
-    'model_path': 'checkpoints_heuristic/alphazero_v2_iter4.pt',  # Path to save/load trained model - use the latest trained model
+    'model_path': None,  # Path to load trained model for evaluation (None = start from scratch)
 }
 
 # Reduced action space configuration
@@ -129,13 +135,13 @@ REDUCED_ACTIONS = [0, 9, 17, 22, 26, 29, 54, 59]  # Indices from full catalog to
 # This enables dynamic enumeration of full substation bus layouts.
 ACTIONS_CONFIG = {
     'type': 'catalog_bus_switch',  # Set to 'catalog_bus_switch' to activate new catalog; any other value keeps legacy behavior
-    'substations': [3, 4, 5, 8],   # Default substation set (config-driven, extendable)
+    'substations': list(range(14)),  # All 14 substations (0-13)
     'reduction': 'N1',             # One of: 'SYM', 'N0', 'N1'
     'drop_identity': False,        # Keep all actions for consistent NN indices (filter in MCTS instead)
     'include_do_nothing': True,    # Include explicit do-nothing action at index 0
     'masking': True,               # Enable runtime masking of illegal / cooldown actions
     # Future flags (placeholders):
-    'include_line_status_toggles': False,  # Hook for later extension
+     'include_line_status_toggles': False,  # Hook for later extension
     'include_multi_sub_composites': False, # Hook for later extension
 }
 
@@ -189,7 +195,7 @@ TRAINING_CONFIG = {
 # Evaluation configuration
 EVAL_CONFIG = {
     'episodes': None,  # None = use all test scenarios (101 chronics)
-    'max_steps': 1000,  # Reduced from 2000 for faster testing
+    'max_steps': 8000,  # Reduced from 2000 for faster testing
     'metrics': [
         'survival_time',
         'reward',

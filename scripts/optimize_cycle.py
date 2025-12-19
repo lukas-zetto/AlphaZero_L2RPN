@@ -48,7 +48,7 @@ def objective(trial):
     }
     
     # Create trial directory
-    trial_dir = Path(f'optuna_trials_cycle/trial_{trial.number}')
+    trial_dir = Path(f'optuna_trials_cycle_v2/trial_{trial.number}')
     trial_dir.mkdir(parents=True, exist_ok=True)
     
     # Save trial parameters for reference
@@ -240,10 +240,10 @@ def main():
     print("=" * 80)
     
     # Create study with persistent storage
-    storage_path = 'sqlite:///optimization_results/optuna_cycle_study.db'
+    storage_path = 'sqlite:///optimization_results/optuna_cycle_study_v2.db'
     study = optuna.create_study(
         direction='minimize',  # Minimize negative avg steps = maximize avg steps
-        study_name='alphazero_cycle_optimization',
+        study_name='alphazero_cycle_optimization_v2',
         storage=storage_path,  # Persistent SQLite storage - can resume later
         load_if_exists=True,  # Resume if study already exists
         sampler=optuna.samplers.TPESampler(),  # Tree-structured Parzen Estimator (no fixed seed for exploration)

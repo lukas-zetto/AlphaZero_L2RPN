@@ -6,13 +6,7 @@ services:
       - /home/queno/queno:/workspace
       - grid2op-data:/root/data_grid2op
     working_dir: /workspace
-    command: >
-      bash -c "
-        pip3 install optuna pandas plotly &&
-        mkdir -p optimization_results_v2 logs &&
-        python3 -c 'import grid2op; grid2op.make(\"l2rpn_case14_sandbox\")' &&
-        python3 scripts/optimize_hyperparams_v2.py > logs/optimization_v2.log 2>&1
-      "
+    command: tail -f /dev/null
     restart: "no"
 
 volumes:

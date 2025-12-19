@@ -318,13 +318,24 @@ class AlphaZeroTrainerV2:
         self.config = config
         self.use_replay_buffer = config.get('use_replay_buffer', True)
         # Create neural network
-        self.input_size = 83  # From encode_observation_simple
+        self.input_size = 117  # From encode_observation_simple (60 line features + 57 topology bits)
         self.num_actions = len(action_catalog.actions)
         self.neural_network = create_neural_network(
             input_size=self.input_size,
             num_actions=self.num_actions,
             config=config
         )
+        
+        # Load from checkpoint if model_path is specified
+        from config import AGENT_CONFIG
+        model_path = AGENT_CONFIG.get('model_path', None)
+        if model_path and os.path.exists(model_path):
+            print(f"Loading checkpoint from: {model_path}")
+            checkpoint = torch.load(model_path, map_location='cpu')
+            # Handle both 'model_state_dict' and 'network_state_dict' keys
+            state_dict_key = 'model_state_dict' if 'model_state_dict' in checkpoint else 'network_state_dict'
+            self.neural_network.load_state_dict(checkpoint[state_dict_key])
+            print(f"✓ Loaded checkpoint from iteration {checkpoint.get('iteration', 'unknown')}")
         # Create optimizer once (for learning rate decay)
         self.learning_rate = config['learning_rate']
         self.optimizer = torch.optim.Adam(
@@ -896,6 +907,20 @@ class AlphaZeroTrainerV2:
                     'value': data['value']
                 })
         
+        # Save training data if enabled
+        save_enabled = self.config.get('save_training_data', False)
+        print(f"DEBUG: save_training_data = {save_enabled}, type = {type(save_enabled)}")
+        if save_enabled:
+            try:
+                print(f"💾 Attempting to save training data for iteration {iteration}...")
+                self._save_training_data_sample(iteration, training_examples)
+            except Exception as e:
+                print(f"⚠️ ERROR saving training data: {e}")
+                import traceback
+                traceback.print_exc()
+        else:
+            print(f"DEBUG: Training data saving is DISABLED in config")
+        
         # Train using the persistent optimizer
         loss_info = train_neural_network(
             self.neural_network,
@@ -920,6 +945,33 @@ class AlphaZeroTrainerV2:
         else:
             print(f"  Value targets - (none, using heuristic mode)")
         return loss_info
+    
+    def _save_training_data_sample(self, iteration, training_examples):
+        """Save all training data for analysis in .npz format."""
+        import numpy as np
+        
+        data_dir = self.config.get('training_data_dir', 'training_data_samples')
+        os.makedirs(data_dir, exist_ok=True)
+        
+        # Convert training examples to numpy arrays
+        states = np.array([ex['state'] for ex in training_examples], dtype=np.float32)
+        policies = np.array([ex['mcts_policy'] for ex in training_examples], dtype=np.float32)
+        values = np.array([ex['value'] for ex in training_examples], dtype=np.float32)
+        
+        # Save as .npz (NumPy compressed format)
+        filepath = os.path.join(data_dir, f'training_data_iter_{iteration}.npz')
+        np.savez_compressed(
+            filepath,
+            states=states,
+            policies=policies,
+            values=values,
+            iteration=iteration,
+            learning_rate=self.learning_rate,
+            replay_buffer_size=len(self.replay_buffer)
+        )
+        
+        print(f"💾 Saved {len(training_examples)} training examples to {filepath}")
+        print(f"   States: {states.shape}, Policies: {policies.shape}, Values: {values.shape}")
     
     def decay_learning_rate(self):
         """Apply learning rate decay."""
@@ -1023,12 +1075,11 @@ class AlphaZeroTrainerV2:
             return 0
     
     def train(self, num_iterations):
-        """Run full AlphaZero training loop."""
+        """Run full AlphaZero training loop with proper replay buffer logic."""
         print(f"\n{'='*60}")
-        print(f"ALPHAZERO TRAINING V2")
+        print(f"ALPHAZERO TRAINING V2 - Continuous Training")
         print(f"{'='*60}")
-        print(f"Iterations: {num_iterations}")
-        print(f"Episodes per iteration: {self.config['episodes_per_iteration']}")
+        print(f"Total iterations: {num_iterations}")
         print(f"MCTS simulations: {self.config['mcts_simulations']}")
         
         # Check if parallel training is enabled
@@ -1039,12 +1090,32 @@ class AlphaZeroTrainerV2:
             print(f"⚡ Parallel mode: {parallel_workers} workers")
         else:
             print(f"🔄 Sequential mode")
+        
+        # AlphaZero-style replay buffer parameters
+        replay_buffer_min_size = self.config.get('replay_buffer_min_size', 903)
+        train_every = self.config.get('train_every', 300)
+        
+        print(f"📊 Replay buffer: min={replay_buffer_min_size}, max={self.config.get('replay_buffer_size', 3612)} (FIFO)")
+        print(f"📊 Training frequency: every {train_every} episodes after buffer reaches {replay_buffer_min_size}")
         print()
+        
+        episodes_collected = 0  # Track total episodes
+        episodes_since_last_training = 0  # Track episodes since last training
+        training_iteration = 0
         
         for iteration in range(num_iterations):
             print(f"\n{'#'*60}")
             print(f"ITERATION {iteration + 1}/{num_iterations}")
             print(f"{'#'*60}")
+            
+            # Collect episodes - adjust based on buffer state
+            replay_buffer_size = self.config.get('replay_buffer_size', 3612)
+            if len(self.replay_buffer) >= replay_buffer_size:
+                # Buffer is full - collect smaller batches
+                episodes_per_iteration = self.config.get('train_every', 300)
+            else:
+                # Still filling buffer - collect full cycles
+                episodes_per_iteration = self.config['episodes_per_iteration']
             
             # Self-play phase - parallel or sequential
             current_iteration_data = []
@@ -1052,12 +1123,12 @@ class AlphaZeroTrainerV2:
             if use_parallel:
                 # PARALLEL COLLECTION
                 self.self_play_parallel(
-                    num_episodes=self.config['episodes_per_iteration'],
+                    num_episodes=episodes_per_iteration,
                     num_workers=parallel_workers
                 )
             else:
                 # SEQUENTIAL COLLECTION (original behavior)  
-                for episode in range(self.config['episodes_per_iteration']):
+                for episode in range(episodes_per_iteration):
                     episode_len, episode_value = self.self_play_episode(episode, enable_debug=True)
                     # Collect all episode data if not using replay buffer
                     if not self.use_replay_buffer:
@@ -1065,33 +1136,55 @@ class AlphaZeroTrainerV2:
                         if len(self.replay_buffer) > 0:
                             current_iteration_data.extend(self.replay_buffer[-1])  # Last episode
             
-            # Training phase (always sequential)
-            self.train_network(iteration, current_iteration_data=current_iteration_data if not self.use_replay_buffer else None)
+            episodes_collected += episodes_per_iteration
+            episodes_since_last_training += episodes_per_iteration
             
-            # Decay learning rate and temperature after training
-            self.decay_learning_rate()
-            self.decay_temperature()
+            # Check if we should train
+            should_train = False
+            print(f"DEBUG: buffer_size={len(self.replay_buffer)}, min_size={replay_buffer_min_size}, training_iter={training_iteration}, episodes_since={episodes_since_last_training}, train_every={train_every}")
+            if len(self.replay_buffer) < replay_buffer_min_size:
+                print(f"📊 Buffer filling: {len(self.replay_buffer)}/{replay_buffer_min_size} episodes - NOT training yet")
+            elif training_iteration == 0 or episodes_since_last_training >= train_every:
+                # Train on first iteration once buffer is ready, OR every train_every episodes after that
+                should_train = True
+                print(f"📊 Buffer: {len(self.replay_buffer)} episodes, {episodes_since_last_training} new episodes - TRAINING")
+            else:
+                print(f"📊 Buffer: {len(self.replay_buffer)} episodes, {episodes_since_last_training} new episodes - waiting for {train_every - episodes_since_last_training} more")
             
-            # Save checkpoint
-            if (iteration + 1) % self.config['save_every'] == 0:
-                # Use CHECKPOINT_DIR from environment if set, otherwise use method-specific directory
+            # Training phase (only if buffer is ready and enough new episodes)
+            if should_train:
+                self.train_network(training_iteration, current_iteration_data=current_iteration_data if not self.use_replay_buffer else None)
+                
+                # Save checkpoint after each training update
                 if 'CHECKPOINT_DIR' in os.environ:
                     checkpoint_dir = f"/workspace/{os.environ['CHECKPOINT_DIR']}"
                 else:
                     value_method = self.config.get('value_target_method', 'default')
                     checkpoint_dir = f"/workspace/checkpoints_{value_method}" if value_method != 'default' else "/workspace/checkpoints"
-                checkpoint_path = f"{checkpoint_dir}/alphazero_v2_iter{iteration+1}.pt"
+                checkpoint_path = f"{checkpoint_dir}/alphazero_v2_train{training_iteration}.pt"
                 os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
                 torch.save({
-                    'iteration': iteration + 1,
+                    'training_iteration': training_iteration,
+                    'episodes_collected': episodes_collected,
                     'model_state_dict': self.neural_network.state_dict(),
                     'replay_buffer_size': len(self.replay_buffer),
                     'num_actions': self.num_actions,
                     'input_size': self.input_size,
                     'hidden_size': self.config.get('hidden_size', 256),
-                    'config': self.config,  # Save full config with checkpoint
+                    'config': self.config,
                 }, checkpoint_path)
-                print(f"\nCheckpoint saved: {checkpoint_path}")
+                print(f"💾 Checkpoint saved: {checkpoint_path}")
+                
+                training_iteration += 1
+                episodes_since_last_training = 0
+                
+                # Decay learning rate and temperature after training
+                self.decay_learning_rate()
+                self.decay_temperature()
+            
+            # Decay learning rate and temperature after training
+            self.decay_learning_rate()
+            self.decay_temperature()
         
         print(f"\n{'='*60}")
         print(f"TRAINING COMPLETE")
@@ -1238,6 +1331,8 @@ def main():
         'parallel_workers': get_config_value('parallel_workers', AGENT_CONFIG.get('parallel_workers', 0)),
         'max_episode_steps': TRAINING_CONFIG.get('max_steps_per_episode', 10000) or 10000,
         'replay_buffer_size': get_config_value('replay_buffer_size', AGENT_CONFIG.get('replay_buffer_size', 100)),
+        'replay_buffer_min_size': get_config_value('replay_buffer_min_size', AGENT_CONFIG.get('replay_buffer_min_size', 903)),
+        'train_every': get_config_value('train_every', AGENT_CONFIG.get('train_every', 300)),
         'use_replay_buffer': AGENT_CONFIG.get('use_replay_buffer', True),
         'batch_size': AGENT_CONFIG['batch_size'],
         'learning_rate': get_config_value('learning_rate', AGENT_CONFIG['learning_rate']),
@@ -1252,6 +1347,8 @@ def main():
         
         # Checkpointing
         'save_every': 1,  # Save checkpoint every iteration
+        'save_training_data': AGENT_CONFIG.get('save_training_data', False),
+        'training_data_dir': AGENT_CONFIG.get('training_data_dir', 'training_data_samples'),
         
         # Neural network architecture
         'hidden_size': AGENT_CONFIG['hidden_size'],  # Use singular to match network code

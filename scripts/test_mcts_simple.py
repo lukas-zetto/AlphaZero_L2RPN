@@ -17,9 +17,9 @@ try:
 except:
     backend = None
 
-# Import the training module
-import train_agent
-from src.actions.action_catalog import ActionCatalog, build_action_catalog, REDUCTION_N1
+# Import modules
+from actions.action_catalog import ActionCatalog, build_action_catalog, REDUCTION_N1
+from training.alphazero_mcts_v2 import run_mcts, MCTSNodeV2
 
 def analyze_mcts_decision(root, action_probs, starting_step):
     """Analyze MCTS decision details"""

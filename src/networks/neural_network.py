@@ -20,7 +20,7 @@ def encode_observation_simple(obs):
     1. Line loadings (which lines are overloaded)
     2. Line status (which lines are connected/disconnected)  
     3. Line cooldowns (which lines can be switched)
-    4. Bus topology (current bus assignment for switchable elements)
+    4. Bus topology (current bus assignment for ALL substations)
     
     Parameters:
     -----------
@@ -30,7 +30,7 @@ def encode_observation_simple(obs):
     Returns:
     --------
     state_vector : np.ndarray
-        Encoded state vector for neural network (83 features)
+        Encoded state vector for neural network (117 features)
     """
     try:
         features = []
@@ -53,26 +53,15 @@ def encode_observation_simple(obs):
             cooldown_values = [float(x) for x in obs.time_before_cooldown_line]
             features.extend(cooldown_values)
         
-        # 4. Bus topology for switchable substations - 23 features [60:83]
-        # Current bus assignment (0=bus1, 1=bus2) for elements in substations 3, 4, 5, 8
+        # 4. Bus topology for ALL substations - 57 features [60:117]
+        # Current bus assignment (0=bus1, 1=bus2) for all elements in all 14 substations
         if hasattr(obs, 'topo_vect'):
-            # Substation 3: indices 13:19 (6 elements)
-            sub3_topo = obs.topo_vect[13:19] - 1  # Convert from 1/2 to 0/1
-            features.extend([float(x) for x in sub3_topo])
-            
-            # Substation 4: indices 19:24 (5 elements)
-            sub4_topo = obs.topo_vect[19:24] - 1  # Convert from 1/2 to 0/1
-            features.extend([float(x) for x in sub4_topo])
-            
-            # Substation 5: indices 24:31 (7 elements)  
-            sub5_topo = obs.topo_vect[24:31] - 1  # Convert from 1/2 to 0/1
-            features.extend([float(x) for x in sub5_topo])
-            
-            # Substation 8: indices 36:41 (5 elements)
-            sub8_topo = obs.topo_vect[36:41] - 1  # Convert from 1/2 to 0/1
-            features.extend([float(x) for x in sub8_topo])
+            # Include all elements from topology vector (all 57 elements)
+            # Convert from 1-based (1=bus1, 2=bus2) to 0-based (0=bus1, 1=bus2)
+            all_topo = obs.topo_vect - 1
+            features.extend([float(x) for x in all_topo])
         
-        # Total: 20 + 20 + 20 + 23 = 83 features
+        # Total: 20 + 20 + 20 + 57 = 117 features
         return np.array(features, dtype=np.float32)
         
     except Exception as e:
