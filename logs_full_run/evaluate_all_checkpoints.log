@@ -1,0 +1,22 @@
+Found 47 checkpoints to evaluate
+47 checkpoints already evaluated.
+0 checkpoints to evaluate.
+No new checkpoints to evaluate.
+
+✓ Saved results to /workspace/evaluation_results/checkpoint_evaluations.json
+✓ Saved results to /workspace/evaluation_results/checkpoint_evaluations.csv
+✓ Saved performance graph to /workspace/evaluation_results/checkpoint_performance.png
+✓ Saved reward graph to /workspace/evaluation_results/reward_vs_checkpoint.png
+✓ Saved survival rate graph to /workspace/evaluation_results/survival_rate_vs_checkpoint.png
+✓ Saved average steps graph to /workspace/evaluation_results/avg_steps_vs_checkpoint.png
+
+============================================================
+EVALUATION SUMMARY
+============================================================
+Total checkpoints: 47
+Successful evaluations: 47
+Best checkpoint: 21
+Best reward: 4500.55
+Latest checkpoint: 46
+Latest reward: 3916.56
+============================================================

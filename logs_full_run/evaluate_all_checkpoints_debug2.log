@@ -1,0 +1,4 @@
+✓ Saved performance graph to /workspace/evaluation_results/checkpoint_performance.png
+✓ Saved reward graph to /workspace/evaluation_results/reward_vs_checkpoint.png
+No survival rate data to plot.
+No average steps data to plot.
