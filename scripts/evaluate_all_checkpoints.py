@@ -35,13 +35,13 @@ def extract_checkpoint_number(checkpoint_path):
         return int(match.group(1))
     return None
 
-def evaluate_checkpoint(checkpoint_path):
+def evaluate_checkpoint(checkpoint_path, output_prefix="mcts_root"):
     """Run evaluation for a single checkpoint and parse results."""
     checkpoint_num = extract_checkpoint_number(checkpoint_path)
     print(f"Evaluating checkpoint {checkpoint_num}: {checkpoint_path.name}")
     
     # Create temporary config with this checkpoint
-    log_file = f"/workspace/logs/eval_checkpoint_{checkpoint_num}.log"
+    log_file = f"/workspace/logs/eval_checkpoint_{output_prefix}_{checkpoint_num}.log"
     
     # Run evaluation script with checkpoint path as model_path
     env = os.environ.copy()
@@ -75,6 +75,10 @@ def evaluate_checkpoint(checkpoint_path):
         # "Average reward: 123.45"
         # "Average steps: 5678"
         # "Survived: 95/101"
+        # OR table format:
+        # "Avg Reward                819.58               1126.74"
+        # "Avg Steps                 1103.1               1523.8"
+        # "Survived Episodes         0                    0"
         
         reward_match = re.search(r'Average reward[:\s]+([0-9.]+)', output, re.IGNORECASE)
         if reward_match:
@@ -89,11 +93,27 @@ def evaluate_checkpoint(checkpoint_path):
             survived_episodes = int(survived_match.group(1))
             total_episodes = int(survived_match.group(2))
         
-        # Alternative patterns
+        # Alternative patterns for table format
         if avg_reward is None:
-            reward_match = re.search(r'reward[:\s]+([0-9.]+)', output, re.IGNORECASE)
+            reward_match = re.search(r'Avg\s+Reward\s+([0-9.]+)', output, re.IGNORECASE)
             if reward_match:
                 avg_reward = float(reward_match.group(1))
+        
+        if avg_steps is None:
+            steps_match = re.search(r'Avg\s+Steps\s+([0-9.]+)', output, re.IGNORECASE)
+            if steps_match:
+                avg_steps = float(steps_match.group(1))
+        
+        if survived_episodes is None:
+            survived_match = re.search(r'Survived\s+Episodes\s+(\d+)', output, re.IGNORECASE)
+            if survived_match:
+                survived_episodes = int(survived_match.group(1))
+        
+        # Try to get total episodes from "Episodes                  101"
+        if total_episodes is None:
+            episodes_match = re.search(r'^\s*Episodes\s+(\d+)', output, re.MULTILINE)
+            if episodes_match:
+                total_episodes = int(episodes_match.group(1))
         
         return {
             'checkpoint_num': checkpoint_num,
@@ -179,8 +199,8 @@ def parse_metrics_from_log(log_file):
     return survival_rate, survived_episodes, avg_steps, total_episodes
 
 def main():
-    checkpoint_dir = "/workspace/checkpoints_heuristic"
-    output_dir = "/workspace/evaluation_results"
+    checkpoint_dir = "/workspace/checkpoints_mcts_root"
+    output_dir = "/workspace/evaluation_results_mcts_root"
     os.makedirs(output_dir, exist_ok=True)
     results_file = os.path.join(output_dir, "checkpoint_evaluations.json")
 
@@ -207,7 +227,7 @@ def main():
         print(f"\nEvaluating with {max_workers} parallel workers...\n")
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             future_to_checkpoint = {
-                executor.submit(evaluate_checkpoint, cp): cp 
+                executor.submit(evaluate_checkpoint, cp, "mcts_root"): cp 
                 for cp in checkpoints_to_eval
             }
             for future in as_completed(future_to_checkpoint):
@@ -372,7 +392,7 @@ if __name__ == "__main__":
 
     if args.plot_only:
         # Only plot from saved results
-        output_dir = "/workspace/evaluation_results"
+        output_dir = "/workspace/evaluation_results_mcts_root"
         results_file = os.path.join(output_dir, "checkpoint_evaluations.json")
         if not os.path.exists(results_file):
             print(f"No saved results found at {results_file}")

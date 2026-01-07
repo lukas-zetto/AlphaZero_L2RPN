@@ -3,11 +3,15 @@ services:
     image: bdonnot/l2rpn:idf.2023.4
     container_name: topology_optimization
     volumes:
-      - /home/queno/queno:/workspace
+      - /home/quenouser/queno:/workspace
       - grid2op-data:/root/data_grid2op
     working_dir: /workspace
     command: tail -f /dev/null
     restart: "no"
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
 
 volumes:
   grid2op-data:

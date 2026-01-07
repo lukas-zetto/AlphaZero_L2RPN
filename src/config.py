@@ -37,7 +37,7 @@ AGENT_CONFIG = {
     'max_training_chronics': None,  #
     
     # Value assignment method
-    'value_target_method': 'heuristic',  # Options:
+    'value_target_method': 'mcts_root',  # Options:
         # 'mcts_root': Use MCTS Q-values from root node only
         # 'binary_root': Use binary episode outcomes for root node only (+1/-1)
         # 'mcts_all_nodes': Use MCTS Q-values from ALL tree nodes (50-200x more training data)
@@ -74,20 +74,19 @@ AGENT_CONFIG = {
     'policy_temperature': 1.0,  # Temperature for policy distribution (1.0 = no sharpening, just raw visit counts)
     'selection_bias_weight': 0.0,  # Set to 0 to prevent action collapse
     
-    # Dirichlet noise for exploration (AlphaZero technique)
+    # # Dirichlet noise for exploration (AlphaZero technique)
     'dirichlet_alpha': 0.15227525095137953,    # Set from trial_params.json
     'dirichlet_epsilon': 0.05,  # Optimized value from best_hyperparameters_cycle.json
 
     # Neural network parameters
     'hidden_size': 256,  # Larger network for better capacity (enliteAI used 512 for larger grids)
     'neural_network_implementation': 'v1',  # Use stable implementation
-    'num_workers': 15,  # Number of parallel workers for training
     
     # Model training parameters
-    'num_cycles': 50,  # 10 cycles through all training chronics
+    'num_cycles': 50,  # 50 cycles through all training chronics
     'episodes_per_iteration': 903,  # Full cycle through all training chronics
-    'episodes_per_iteration_after_buffer_full': 301,  # Train 3x more often once buffer is full
-    'parallel_workers': 15,  # 14 parallel workers for faster training
+    'episodes_per_iteration_after_buffer_full': 903,  # Train after full circles
+    'parallel_workers': 30,  # 1 worker for sequential training
     'training_epochs': 5,  # Increased for better convergence per iteration
     'weight_decay': 0.0001,  # Standard L2 regularization
     'policy_weight': 1.0,  # Balanced loss weighting
@@ -195,7 +194,7 @@ TRAINING_CONFIG = {
 # Evaluation configuration
 EVAL_CONFIG = {
     'episodes': None,  # None = use all test scenarios (101 chronics)
-    'max_steps': 8000,  # Reduced from 2000 for faster testing
+    'max_steps': None,  # None = no limit, run episodes to completion
     'metrics': [
         'survival_time',
         'reward',

@@ -1,0 +1,11 @@
+checkpoint_num,checkpoint_path,avg_reward,avg_steps,survived_episodes,total_episodes,log_file,success
+0,/workspace/checkpoints_heuristic/alphazero_v2_train0.pt,819.58,1103.1,0,101,/workspace/logs/eval_checkpoint_0.log,True
+1,/workspace/checkpoints_heuristic/alphazero_v2_train1.pt,1189.06,1593.4,3,101,/workspace/logs/eval_checkpoint_1.log,True
+2,/workspace/checkpoints_heuristic/alphazero_v2_train2.pt,3458.08,4701.5,39,101,/workspace/logs/eval_checkpoint_2.log,True
+3,/workspace/checkpoints_heuristic/alphazero_v2_train3.pt,5360.0,7364.6,81,101,/workspace/logs/eval_checkpoint_3.log,True
+4,/workspace/checkpoints_heuristic/alphazero_v2_train4.pt,5290.3,7148.4,77,101,/workspace/logs/eval_checkpoint_4.log,True
+5,/workspace/checkpoints_heuristic/alphazero_v2_train5.pt,5235.61,7076.8,77,101,/workspace/logs/eval_checkpoint_5.log,True
+6,/workspace/checkpoints_heuristic/alphazero_v2_train6.pt,5380.82,7245.9,77,101,/workspace/logs/eval_checkpoint_6.log,True
+7,/workspace/checkpoints_heuristic/alphazero_v2_train7.pt,5192.86,7072.4,75,101,/workspace/logs/eval_checkpoint_7.log,True
+8,/workspace/checkpoints_heuristic/alphazero_v2_train8.pt,5232.35,7123.8,75,101,/workspace/logs/eval_checkpoint_8.log,True
+9,/workspace/checkpoints_heuristic/alphazero_v2_train9.pt,5171.97,7044.5,75,101,/workspace/logs/eval_checkpoint_9.log,True

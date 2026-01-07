@@ -100,9 +100,9 @@ def evaluate_on_scenarios(env, agent, scenarios=None, max_episodes=None):
         
         done = False
         step = 0
-        max_steps = EVAL_CONFIG.get('max_steps', 8064)  # ~1 week
+        max_steps = EVAL_CONFIG.get('max_steps', None)  # None = no limit
         
-        while not done and step < max_steps:
+        while not done and (max_steps is None or step < max_steps):
             try:
                 action = agent.act(obs, reward if step > 0 else None, done)
                 obs, reward, done, info = env.step(action)
@@ -121,7 +121,8 @@ def evaluate_on_scenarios(env, agent, scenarios=None, max_episodes=None):
         
         episode_data['steps'] = step
         episode_data['final_step'] = step
-        episode_data['survived'] = (step >= max_steps)
+        # Survived if: reached max_steps limit, OR completed most of chronic (>= 8064 steps)
+        episode_data['survived'] = (max_steps is not None and step >= max_steps) or (max_steps is None and step >= 8064)
         
         results.append(episode_data)
     
@@ -312,9 +313,9 @@ def compare_agents(env, scenarios=None, max_episodes=None):
         
         done = False
         step = 0
-        max_steps = EVAL_CONFIG.get('max_steps', 8064)
+        max_steps = EVAL_CONFIG.get('max_steps', None)
         
-        while not done and step < max_steps:
+        while not done and (max_steps is None or step < max_steps):
             try:
                 action = custom_agent.act(obs, reward if step > 0 else None, done)
                 obs, reward, done, info = env.step(action)
@@ -329,7 +330,8 @@ def compare_agents(env, scenarios=None, max_episodes=None):
                 break
         
         custom_episode['steps'] = step
-        custom_episode['survived'] = (step >= max_steps)
+        # Survived if: reached max_steps limit, OR completed most of chronic (>= 8064 steps)
+        custom_episode['survived'] = (max_steps is not None and step >= max_steps) or (max_steps is None and step >= 8064)
         custom_results.append(custom_episode)
         
         # Test do nothing agent on same scenario
@@ -346,7 +348,7 @@ def compare_agents(env, scenarios=None, max_episodes=None):
         done = False
         step = 0
         
-        while not done and step < max_steps:
+        while not done and (max_steps is None or step < max_steps):
             try:
                 action = do_nothing_agent.act(obs, reward if step > 0 else None, done)
                 obs, reward, done, info = env.step(action)
@@ -356,7 +358,8 @@ def compare_agents(env, scenarios=None, max_episodes=None):
                 break
         
         do_nothing_episode['steps'] = step
-        do_nothing_episode['survived'] = (step >= max_steps)
+        # Survived if: reached max_steps limit, OR completed most of chronic (>= 8064 steps)
+        do_nothing_episode['survived'] = (max_steps is not None and step >= max_steps) or (max_steps is None and step >= 8064)
         do_nothing_results.append(do_nothing_episode)
     
     print()  # New line after progress

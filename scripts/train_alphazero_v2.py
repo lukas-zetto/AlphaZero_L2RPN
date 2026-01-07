@@ -92,10 +92,11 @@ def _parallel_episode_worker(args):
         # Restore stdout
         sys.stdout = old_stdout
         
-        # Load shared network weights if provided
-        if 'network_state_dict' in config:
-            neural_network.load_state_dict(config['network_state_dict'])
-            neural_network.eval()  # Set to evaluation mode for inference
+        # DISABLED: Don't load any network weights - use fresh random initialization
+        # Each worker starts with its own random network (pure exploration/heuristic mode)
+        # if 'network_state_dict' in config:
+        #     neural_network.load_state_dict(config['network_state_dict'])
+        #     neural_network.eval()  # Set to evaluation mode for inference
         
         # Set chronic and reset
         env.set_id(chronic_id)
@@ -327,15 +328,16 @@ class AlphaZeroTrainerV2:
         )
         
         # Load from checkpoint if model_path is specified
-        from config import AGENT_CONFIG
-        model_path = AGENT_CONFIG.get('model_path', None)
-        if model_path and os.path.exists(model_path):
-            print(f"Loading checkpoint from: {model_path}")
-            checkpoint = torch.load(model_path, map_location='cpu')
-            # Handle both 'model_state_dict' and 'network_state_dict' keys
-            state_dict_key = 'model_state_dict' if 'model_state_dict' in checkpoint else 'network_state_dict'
-            self.neural_network.load_state_dict(checkpoint[state_dict_key])
-            print(f"✓ Loaded checkpoint from iteration {checkpoint.get('iteration', 'unknown')}")
+        # DISABLED: Start training from scratch with random initialization
+        # from config import AGENT_CONFIG
+        # model_path = AGENT_CONFIG.get('model_path', None)
+        # if model_path and os.path.exists(model_path):
+        #     print(f"Loading checkpoint from: {model_path}")
+        #     checkpoint = torch.load(model_path, map_location='cpu')
+        #     # Handle both 'model_state_dict' and 'network_state_dict' keys
+        #     state_dict_key = 'model_state_dict' if 'model_state_dict' in checkpoint else 'network_state_dict'
+        #     self.neural_network.load_state_dict(checkpoint[state_dict_key])
+        #     print(f"✓ Loaded checkpoint from iteration {checkpoint.get('iteration', 'unknown')}")
         # Create optimizer once (for learning rate decay)
         self.learning_rate = config['learning_rate']
         self.optimizer = torch.optim.Adam(
@@ -1192,6 +1194,9 @@ class AlphaZeroTrainerV2:
 
 
 def main():
+    # Create logs directory if it doesn't exist
+    os.makedirs('logs', exist_ok=True)
+    
     # Parse command-line arguments
     import argparse
     parser = argparse.ArgumentParser(description='Train AlphaZero agent')
