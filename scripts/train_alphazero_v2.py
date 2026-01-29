@@ -73,8 +73,13 @@ def _parallel_episode_worker(args):
             catalog = full_catalog
         
         # Create neural network and load shared weights
-        input_size = 83
+        # Dynamically determine input size from environment
+        dummy_obs = env.reset()
+        from networks.neural_network import encode_observation_simple
+        dummy_encoded = encode_observation_simple(dummy_obs)
+        input_size = len(dummy_encoded)
         num_actions = len(catalog.actions)
+        print(f"🔍 WORKER {worker_id}: Dynamic input_size={input_size}, num_actions={num_actions}")
         
         # Import torch for state dict loading
         import torch
@@ -318,9 +323,13 @@ class AlphaZeroTrainerV2:
         self.action_catalog = action_catalog
         self.config = config
         self.use_replay_buffer = config.get('use_replay_buffer', True)
-        # Create neural network
-        self.input_size = 117  # From encode_observation_simple (60 line features + 57 topology bits)
+        # Create neural network with dynamic input size
+        # Determine input size from actual environment observation
+        dummy_obs = env.reset()
+        dummy_encoded = encode_observation_simple(dummy_obs)
+        self.input_size = len(dummy_encoded)  # Dynamic based on actual environment
         self.num_actions = len(action_catalog.actions)
+        print(f"🔍 TRAINER: Dynamic input_size={self.input_size}, num_actions={self.num_actions}")
         self.neural_network = create_neural_network(
             input_size=self.input_size,
             num_actions=self.num_actions,
@@ -354,6 +363,11 @@ class AlphaZeroTrainerV2:
         
         # Training data buffer - stores EPISODES (each episode is a list of experiences)
         self.replay_buffer = deque(maxlen=config.get('replay_buffer_size', 100))
+        
+        # Performance tracking for plotting
+        self.episode_rewards = []  # Cumulative reward per episode
+        self.episode_success = []  # 1 if success, 0 if failure
+        self.episode_lengths = []  # Steps per episode
         
         # Split chronics into train/test with random test selection
         from config import TRAINING_CONFIG
@@ -861,7 +875,14 @@ class AlphaZeroTrainerV2:
         if len(episode_data) > 0:
             self.replay_buffer.append(episode_data)
         
-        return len(episode_data), 1.0 if not is_failure else -1.0  # Episode outcome for logging only
+        # Track performance metrics
+        self.episode_rewards.append(cumulative_reward)
+        self.episode_success.append(0.0 if is_failure else 1.0)
+        self.episode_lengths.append(step)
+        
+        # Return: (num_samples, episode_outcome, num_steps)
+        # num_steps = actual environment interactions (actions taken in real env, not MCTS sims)
+        return len(episode_data), 1.0 if not is_failure else -1.0, step
     
     def train_network(self, iteration, current_iteration_data=None):
         """Train neural network on replay buffer or just current iteration's data."""
@@ -1008,7 +1029,7 @@ class AlphaZeroTrainerV2:
             num_workers: Number of parallel workers (default: min(cpu_count, num_episodes))
         
         Returns:
-            total_collected: Total number of training examples collected
+            (total_collected, total_steps): Number of training examples and environment steps
         """
         if num_workers is None:
             num_workers = min(mp.cpu_count(), num_episodes)
@@ -1036,6 +1057,7 @@ class AlphaZeroTrainerV2:
             
             # Process results
             total_examples = 0
+            total_steps = 0  # Track environment steps
             successful = 0
             failed = 0
             
@@ -1043,6 +1065,7 @@ class AlphaZeroTrainerV2:
                 if result['success']:
                     successful += 1
                     episode_data = result['episode_data']
+                    total_steps += result['steps']  # Accumulate steps from each episode
                     
                     # Convert to expected format and add to replay buffer
                     formatted_data = []
@@ -1064,17 +1087,19 @@ class AlphaZeroTrainerV2:
                     if result['error']:
                         print(f"     Error: {result['error'][:150]}...")
             
-            print(f"\n  Summary: {successful}/{num_episodes} successful, {total_examples} total examples")
-            return total_examples
+            print(f"\n  Summary: {successful}/{num_episodes} successful, {total_examples} total examples, {total_steps:,} total steps")
+            return total_examples, total_steps
             
         except Exception as e:
             print(f"❌ Parallel collection failed: {e}")
             print(traceback.format_exc())
             # Fall back to sequential
             print("⚠️ Falling back to sequential collection...")
+            total_steps_fallback = 0
             for episode in range(num_episodes):
-                self.self_play_episode(episode)
-            return 0
+                _, _, episode_steps = self.self_play_episode(episode)
+                total_steps_fallback += episode_steps
+            return 0, total_steps_fallback
     
     def train(self, num_iterations):
         """Run full AlphaZero training loop with proper replay buffer logic."""
@@ -1104,6 +1129,7 @@ class AlphaZeroTrainerV2:
         episodes_collected = 0  # Track total episodes
         episodes_since_last_training = 0  # Track episodes since last training
         training_iteration = 0
+        total_steps = 0  # Track total environment steps (actual actions taken)
         
         for iteration in range(num_iterations):
             print(f"\n{'#'*60}")
@@ -1124,14 +1150,16 @@ class AlphaZeroTrainerV2:
             
             if use_parallel:
                 # PARALLEL COLLECTION
-                self.self_play_parallel(
+                _, parallel_steps = self.self_play_parallel(
                     num_episodes=episodes_per_iteration,
                     num_workers=parallel_workers
                 )
+                total_steps += parallel_steps  # Accumulate steps from parallel episodes
             else:
                 # SEQUENTIAL COLLECTION (original behavior)  
                 for episode in range(episodes_per_iteration):
-                    episode_len, episode_value = self.self_play_episode(episode, enable_debug=True)
+                    episode_len, episode_value, episode_steps = self.self_play_episode(episode, enable_debug=True)
+                    total_steps += episode_steps  # Accumulate environment steps
                     # Collect all episode data if not using replay buffer
                     if not self.use_replay_buffer:
                         # Get the last episode from replay buffer (the episode we just played)
@@ -1140,6 +1168,9 @@ class AlphaZeroTrainerV2:
             
             episodes_collected += episodes_per_iteration
             episodes_since_last_training += episodes_per_iteration
+            
+            # Log progress with step count
+            print(f"\n📊 Progress: {episodes_collected} episodes, {total_steps:,} environment steps")
             
             # Check if we should train
             should_train = False
@@ -1165,17 +1196,41 @@ class AlphaZeroTrainerV2:
                     checkpoint_dir = f"/workspace/checkpoints_{value_method}" if value_method != 'default' else "/workspace/checkpoints"
                 checkpoint_path = f"{checkpoint_dir}/alphazero_v2_train{training_iteration}.pt"
                 os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
+                
+                # Calculate recent performance (last 100 episodes or all available)
+                recent_window = min(100, len(self.episode_rewards))
+                if recent_window > 0:
+                    recent_avg_reward = np.mean(self.episode_rewards[-recent_window:])
+                    recent_success_rate = np.mean(self.episode_success[-recent_window:])
+                    recent_avg_length = np.mean(self.episode_lengths[-recent_window:])
+                else:
+                    recent_avg_reward = 0.0
+                    recent_success_rate = 0.0
+                    recent_avg_length = 0.0
+                
                 torch.save({
                     'training_iteration': training_iteration,
                     'episodes_collected': episodes_collected,
+                    'total_steps': total_steps,  # Total environment interactions
                     'model_state_dict': self.neural_network.state_dict(),
                     'replay_buffer_size': len(self.replay_buffer),
                     'num_actions': self.num_actions,
                     'input_size': self.input_size,
                     'hidden_size': self.config.get('hidden_size', 256),
                     'config': self.config,
+                    # Performance metrics for plotting
+                    'performance': {
+                        'avg_reward_recent': recent_avg_reward,
+                        'success_rate_recent': recent_success_rate,
+                        'avg_episode_length_recent': recent_avg_length,
+                        'total_episodes': len(self.episode_rewards),
+                        'all_episode_rewards': self.episode_rewards,
+                        'all_episode_success': self.episode_success,
+                        'all_episode_lengths': self.episode_lengths,
+                    }
                 }, checkpoint_path)
                 print(f"💾 Checkpoint saved: {checkpoint_path}")
+                print(f"   Steps: {total_steps:,} | Avg reward (last {recent_window}): {recent_avg_reward:.2f} | Success rate: {recent_success_rate:.1%}")
                 
                 training_iteration += 1
                 episodes_since_last_training = 0
@@ -1191,6 +1246,14 @@ class AlphaZeroTrainerV2:
         print(f"\n{'='*60}")
         print(f"TRAINING COMPLETE")
         print(f"{'='*60}")
+        print(f"📊 Final Statistics:")
+        print(f"  Total episodes: {episodes_collected}")
+        print(f"  Total environment steps: {total_steps:,}")
+        print(f"  Training updates: {training_iteration}")
+        print(f"  Replay buffer size: {len(self.replay_buffer)} episodes")
+        if episodes_collected > 0:
+            print(f"  Average steps per episode: {total_steps / episodes_collected:.1f}")
+        print()
 
 
 def main():

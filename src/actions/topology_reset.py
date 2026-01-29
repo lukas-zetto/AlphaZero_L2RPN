@@ -12,6 +12,7 @@ Benefits:
 """
 
 import numpy as np
+from grid2op.Agent import RecoPowerlineAgent
 
 
 def should_reset_topology(observation, safe_threshold=0.75):
@@ -27,6 +28,34 @@ def should_reset_topology(observation, safe_threshold=0.75):
     """
     max_rho = observation.rho.max()
     return max_rho <= safe_threshold
+
+
+def create_reset_action(observation, env, method='reco_agent'):
+    """
+    Create a Grid2Op action that resets topology to reference configuration.
+    
+    Args:
+        observation: Grid2Op observation
+        env: Grid2Op environment (to access full action space)
+        method: 'reco_agent' or 'manual' - which reset method to use
+    
+    Returns:
+        Grid2Op action that resets topology appropriately
+    """
+    if method == 'reco_agent':
+        # Use Grid2Op's built-in reset agent with full action space (including line switching)
+        # Our trained model uses a limited bus-only action space, but RecoPowerlineAgent
+        # specifically needs line reconnection capabilities
+        full_action_space = env.action_space
+        reset_agent = RecoPowerlineAgent(full_action_space)
+        return reset_agent.act(observation, reward=None, done=False)
+    
+    elif method == 'manual':
+        # Use manual topology reset approach
+        return create_manual_reset_action(observation, env.action_space)
+    
+    else:
+        raise ValueError(f"Unknown topology reset method: {method}. Use 'reco_agent' or 'manual'")
 
 
 def is_topology_reference(observation):
@@ -68,119 +97,18 @@ def is_topology_reference(observation):
     return False  # Conservative: always try to reset if safe
 
 
-def create_reset_action(observation, action_space):
+def create_manual_reset_action(observation, action_space):
     """
-    Create a Grid2Op action that resets topology to reference configuration.
+    Create a manual reset action that sets all substations to reference topology.
+    
+    This is the original manual approach that sets all elements to bus 1.
     
     Args:
         observation: Grid2Op observation
         action_space: Grid2Op action space
     
     Returns:
-        Grid2Op action that resets all substations to reference topology
-    """
-    # Create a "set to reference topology" action
-    # This uses the action_space's ability to reset topology
-    
-    # The most reliable way is to explicitly set all modified substations back
-    # But Grid2Op provides a simpler method: set_bus action with specific values
-    
-    # Create empty action
-    reset_action = action_space()
-    
-    # For each substation, check if it's modified and reset it
-    n_sub = observation.n_sub
-    
-    for sub_id in range(n_sub):
-        # Get elements at this substation
-        elements = observation.sub_info[sub_id]
-        
-        # Check if substation topology is modified
-        # (any element on bus != 1 or bus == -1 means disconnected)
-        topo = observation.state_of(substation_id=sub_id)
-        
-        # If all elements are on bus 1, it's likely reference (skip)
-        # If any element is on bus 2, -1, or 0, we need to reset
-        if np.any(topo['topo_vect'] != 1):
-            # Reset this substation to reference topology
-            # set_bus with [1, 1, 1, ...] for all elements puts them on bus 1
-            n_elements = len(topo['topo_vect'])
-            reference_config = [1] * n_elements  # All on bus 1
-            
-            # Apply to action
-            reset_action.set_bus = {
-                'substations_id': [(sub_id, reference_config)]
-            }
-    
-    return reset_action
-
-
-def create_simple_reset_action(action_space):
-    """
-    Create a simple reset action that sets all substations to reference.
-    
-    This is a simpler version that doesn't check current state - just
-    creates an action that will reset everything.
-    
-    Args:
-        action_space: Grid2Op action space
-    
-    Returns:
-        Grid2Op action
-    """
-    # The simplest approach: create a "do nothing" action
-    # Actually, we want to explicitly reset topology
-    
-    # Grid2Op might have a built-in "reset topology" method
-    # Let's try using the action space's ability to set topology
-    
-    # For now, return a do-nothing action as fallback
-    # This won't reset modified topology, but won't cause errors
-    return action_space()
-
-
-def get_reset_action_if_safe(observation, action_space, safe_threshold=0.75):
-    """
-    Get a topology reset action if the grid is in a safe state.
-    
-    Args:
-        observation: Grid2Op observation
-        action_space: Grid2Op action space
-        safe_threshold: Maximum rho threshold to consider "safe" (default 0.75)
-    
-    Returns:
-        (should_reset: bool, action: Grid2Op action or None)
-        - should_reset: True if reset is recommended
-        - action: Reset action to apply, or None if no reset needed
-    """
-    # Check if grid is safe
-    if not should_reset_topology(observation, safe_threshold):
-        return False, None
-    
-    # Check if already in reference topology
-    if is_topology_reference(observation):
-        return False, None
-    
-    # Create reset action
-    reset_action = create_reset_action(observation, action_space)
-    
-    return True, reset_action
-
-
-# Simpler implementation for initial integration
-def get_reference_topology_action(observation, action_space):
-    """
-    Create an action that attempts to reset all substations to reference topology.
-    
-    This uses a conservative approach: for each substation that has been modified,
-    create an action to put all elements back on bus 1 (default configuration).
-    
-    Args:
-        observation: Grid2Op observation
-        action_space: Grid2Op action space
-    
-    Returns:
-        Grid2Op action (may be do-nothing if already in reference)
+        Grid2Op action that resets topology to reference
     """
     # Start with empty action
     action = action_space()
@@ -206,22 +134,41 @@ def get_reference_topology_action(observation, action_space):
     if len(modified_subs) == 0:
         return action
     
-    # Build list of all substations to reset
-    all_subs_to_reset = []
+    # Reset each modified substation individually using proper Grid2Op API
     for sub_id in modified_subs:
         try:
             sub_topo = observation.state_of(substation_id=sub_id)
             n_elements = len(sub_topo['topo_vect'])
             
-            # Add to list: set all elements to bus 1
-            all_subs_to_reset.append((sub_id, [1] * n_elements))
+            # Set all elements in this substation to bus 1
+            sub_start = sum(observation.sub_info[:sub_id])
+            for element_idx in range(n_elements):
+                global_idx = sub_start + element_idx
+                action.set_bus[global_idx] = 1
         except:
             continue
     
-    # Set all substations at once (not one at a time)
-    if len(all_subs_to_reset) > 0:
-        action.set_bus = {
-            'substations_id': all_subs_to_reset
-        }
-    
     return action
+
+
+def get_reference_topology_action(observation, env):
+    """
+    Create an action that attempts to reset all substations to reference topology.
+    
+    Uses the configured reset method from config.py.
+    
+    Args:
+        observation: Grid2Op observation
+        env: Grid2Op environment (to access full action space and config)
+    
+    Returns:
+        Grid2Op action (may be do-nothing if already in reference)
+    """
+    # Try to get reset method from config, default to 'reco_agent'
+    try:
+        from src.config import AGENT_CONFIG
+        method = AGENT_CONFIG.get('topology_reset_method', 'reco_agent')
+    except:
+        method = 'reco_agent'  # Default fallback
+    
+    return create_reset_action(observation, env, method)

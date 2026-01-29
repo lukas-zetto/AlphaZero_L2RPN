@@ -37,7 +37,7 @@ AGENT_CONFIG = {
     'max_training_chronics': None,  #
     
     # Value assignment method
-    'value_target_method': 'mcts_root',  # Options:
+    'value_target_method': 'heuristic',  # Options:
         # 'mcts_root': Use MCTS Q-values from root node only
         # 'binary_root': Use binary episode outcomes for root node only (+1/-1)
         # 'mcts_all_nodes': Use MCTS Q-values from ALL tree nodes (50-200x more training data)
@@ -86,23 +86,23 @@ AGENT_CONFIG = {
     'num_cycles': 50,  # 50 cycles through all training chronics
     'episodes_per_iteration': 903,  # Full cycle through all training chronics
     'episodes_per_iteration_after_buffer_full': 903,  # Train after full circles
-    'parallel_workers': 30,  # 1 worker for sequential training
+    'parallel_workers': 0,  # 1 worker for sequential training
     'training_epochs': 5,  # Increased for better convergence per iteration
     'weight_decay': 0.0001,  # Standard L2 regularization
     'policy_weight': 1.0,  # Balanced loss weighting
     'value_weight': 1.0,   # Equal importance for policy and value
-    'input_size': 117,  # Extended encoding: 60 line features + 57 bus topology bits (all 14 subs)
+    # input_size: Dynamically determined from environment observation (removed hardcoded value)
     # Experience replay toggle
     'use_replay_buffer': True,  # Maintain experience diversity across iterations
     'replay_buffer_min_size': 903,  # Min episodes before training starts
     'replay_buffer_size': 3612,  # 4 full cycles (4*903) FIFO
     'train_every': 300,  # Train every 300 episodes after buffer is full
-        # Input encoding breakdown:
-        # - Line loads (rho): 20 bits [0:20]
-        # - Line status: 20 bits [20:40] 
-        # - Line cooldowns: 20 bits [40:60]
-        # - Bus topology (ALL 14 subs): 57 bits [60:117]
-        #   * All topology vector elements from all substations
+        # Input encoding breakdown (dynamic based on environment):
+        # - Line loads (rho): n_line features [0:n_line]
+        # - Line status: n_line features [n_line:2*n_line] 
+        # - Line cooldowns: n_line features [2*n_line:3*n_line]
+        # - Bus topology: topo_vect_size features [3*n_line:3*n_line+topo_vect_size]
+        #   * All topology vector elements from environment
         # Action space
     'max_actions': 82,  # Number of possible actions (all 14 substations + do-nothing)
     
@@ -116,6 +116,7 @@ AGENT_CONFIG = {
     
     # Topology reset parameters
     'topology_reset_threshold': 0.75,  # Reset to reference topology when max_rho ≤ this value (0.75 = 75% load)
+    'topology_reset_method': 'reco_agent',  # 'reco_agent' or 'manual' - how to reset topology to reference
 
     # Grid operation parameters
     'max_redispatch': 50.0,  # MW

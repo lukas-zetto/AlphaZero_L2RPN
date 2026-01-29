@@ -30,50 +30,58 @@ def encode_observation_simple(obs):
     Returns:
     --------
     state_vector : np.ndarray
-        Encoded state vector for neural network (117 features)
+        Encoded state vector for neural network (dynamic size based on environment)
     """
     try:
         features = []
         
-        # 1. Line loadings (rho) - 20 features [0:20]
+        # 1. Line loadings (rho) - n_line features
         # Critical for identifying overloaded lines that need disconnection
         if hasattr(obs, 'rho'):
             rho_values = [float(x) for x in obs.rho]
             features.extend(rho_values)
+            n_lines = len(rho_values)
             
-        # 2. Line status - 20 features [20:40]
+        # 2. Line status - n_line features
         # Which lines are currently connected (True/1) or disconnected (False/0)
         if hasattr(obs, 'line_status'):
             status_values = [float(x) for x in obs.line_status]
             features.extend(status_values)
             
-        # 3. Line cooldowns - 20 features [40:60]
+        # 3. Line cooldowns - n_line features
         # Time before each line can be switched (0 = can switch now)
         if hasattr(obs, 'time_before_cooldown_line'):
             cooldown_values = [float(x) for x in obs.time_before_cooldown_line]
             features.extend(cooldown_values)
         
-        # 4. Bus topology for ALL substations - 57 features [60:117]
-        # Current bus assignment (0=bus1, 1=bus2) for all elements in all 14 substations
+        # 4. Bus topology - topo_vect_size features
+        # Current bus assignment (0=bus1, 1=bus2) for all elements in topology vector
+        # NOTE: Actual size depends on environment (l2rpn_case14_sandbox vs rte_case14_realistic)
         if hasattr(obs, 'topo_vect'):
-            # Include all elements from topology vector (all 57 elements)
+            # Include all elements from topology vector
             # Convert from 1-based (1=bus1, 2=bus2) to 0-based (0=bus1, 1=bus2)
-            all_topo = obs.topo_vect - 1
-            features.extend([float(x) for x in all_topo])
+            # Handle disconnected elements: -1 stays -1
+            all_topo = []
+            for topo_val in obs.topo_vect:
+                if topo_val == -1:
+                    all_topo.append(-1.0)  # Keep disconnected as -1
+                else:
+                    all_topo.append(float(topo_val - 1))  # Convert 1->0, 2->1
+            features.extend(all_topo)
+            topo_size = len(all_topo)
         
-        # Total: 20 + 20 + 20 + 57 = 117 features
+        # Debug output - show actual dimensions
+        total_features = len(features)
+        print(f"🔍 ENCODING DEBUG: n_lines={n_lines}, topo_size={topo_size}, total_features={total_features}")
+        print(f"   Breakdown: rho({n_lines}) + status({n_lines}) + cooldowns({n_lines}) + topology({topo_size}) = {total_features}")
+        
+        # Total: 3*n_line + topo_vect_size features (depends on environment)
         return np.array(features, dtype=np.float32)
         
     except Exception as e:
-        # Fallback: return minimal state if encoding fails
-        print(f"⚠️ Observation encoding failed: {e}")
-        # Return rho + zeros for topology as fallback
-        try:
-            rho_features = obs.rho.tolist()
-            fallback_features = rho_features + [0.0] * (83 - len(rho_features))
-            return np.array(fallback_features[:83], dtype=np.float32)
-        except:
-            return np.zeros(83, dtype=np.float32)  # Full 83-feature fallback
+        # Encoding failed - this should not happen in normal operation
+        print(f"⚠️ Critical: Observation encoding failed: {e}")
+        raise RuntimeError(f"Cannot encode observation: {e}. Check environment compatibility.")
 
 
 def create_neural_network(input_size, num_actions, config):
@@ -95,6 +103,9 @@ def create_neural_network(input_size, num_actions, config):
         Shared neural network with policy and value heads
     """
     hidden_size = config.get('hidden_size', 256)
+    
+    # Debug output for network creation
+    print(f"🔍 NETWORK CREATION: input_size={input_size}, num_actions={num_actions}, hidden_size={hidden_size}")
     
     # Create shared network with policy and value heads
     network = AlphaZeroNetwork(

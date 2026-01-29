@@ -325,8 +325,12 @@ class MyCustomAgent(BaseAgent):
             if len(modified_subs) == 0:
                 return None
             
-            # Create reset action
-            reset_action = get_reference_topology_action(observation, self.action_space)
+            # Create reset action using environment with full action space
+            env_to_use = self.current_env or self._baseline_env
+            if env_to_use is None:
+                return None
+                
+            reset_action = get_reference_topology_action(observation, env_to_use)
             max_rho = observation.rho.max()
             print(f"   🔄 Grid is very safe (rho={max_rho:.3f}) - resetting topology to reference ({len(modified_subs)} modified substations)")
             return reset_action
