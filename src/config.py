@@ -88,7 +88,8 @@ AGENT_CONFIG = {
 
     # Neural network parameters
     'hidden_size': 256,  # Larger network for better capacity (enliteAI used 512 for larger grids)
-    'neural_network_implementation': 'v1',  # Use stable implementation
+    'neural_network_implementation': 'rbm',  # Use stable implementation
+    'rbm_model_file': 'src/networks/queno_rbm_25_10.npz',  # Path to pre-trained RBM model file
     
     # Model training parameters
     'num_cycles': 50,  # 50 cycles through all training chronics

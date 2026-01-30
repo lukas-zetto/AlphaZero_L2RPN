@@ -17,6 +17,7 @@ Usage:
 from typing import Dict, Any
 
 
+
 def get_neural_network_module(config: Dict[str, Any]):
     """
     Get the neural network module based on config.
@@ -32,9 +33,9 @@ def get_neural_network_module(config: Dict[str, Any]):
     if implementation == 'v1':
         from src.networks import neural_network
         return neural_network
-    elif implementation == 'v2':
-        from src.networks import neural_network_v2  # Alternative implementation (to be created)
-        return neural_network_v2
+    elif implementation == 'rbm':
+        from src.networks import RBM
+        return RBM
     else:
         raise ValueError(f"Unknown neural network implementation: {implementation}")
 
