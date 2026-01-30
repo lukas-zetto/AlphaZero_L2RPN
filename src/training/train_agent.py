@@ -1485,7 +1485,14 @@ def train_alpha_zero_agent():
     
     # Create neural network
     try:
-        input_size = AGENT_CONFIG.get('input_size', 60)
+        # Determine input size dynamically from environment
+        try:
+            dummy_encoded = nn_funcs.encode_observation_simple(obs)
+            input_size = len(dummy_encoded)
+            print(f"🔍 AGENT: Dynamic input_size={input_size}")
+        except:
+            input_size = AGENT_CONFIG.get('input_size', 83)  # Fallback
+            print(f"🔍 AGENT: Fallback input_size={input_size}")
         neural_network = nn_funcs.create_neural_network(
             input_size=input_size,  # Now taken from config
             num_actions=num_actions,

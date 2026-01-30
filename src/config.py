@@ -27,6 +27,14 @@ AGENT_CONFIG = {
     'memory_size': 50000,  # Larger memory for more diverse experiences
     'batch_size': 64,  # Standard batch size for stable training
     
+    # Observation space configuration
+    'obs_space_type': 'gym',  # 'custom' for our optimized encoding, 'gym' for traditional gym-based
+    'gym_obs_attr_to_keep': ["day_of_week", "hour_of_day", "minute_of_hour", "prod_p", "prod_v", "load_p", "load_q",
+                            "actual_dispatch", "target_dispatch", "topo_vect", "time_before_cooldown_line",
+                            "time_before_cooldown_sub", "rho", "timestep_overflow", "line_status",
+                            "storage_power", "storage_charge"],  # Attributes for gym observation space
+    'gym_obs_normalize': True,  # Normalize gym observations
+    
     # Training parameters
     'target_update_frequency': 2000,  # Less frequent updates for stability
     'gamma': 0.95,  # Standard discount factor for long-term planning
@@ -115,7 +123,7 @@ AGENT_CONFIG = {
     'max_reconnections_per_action': 1,  # Number of lines to reconnect per MCTS action (1 = safest)
     
     # Topology reset parameters
-    'topology_reset_threshold': 0.75,  # Reset to reference topology when max_rho ≤ this value (0.75 = 75% load)
+    'topology_reset_threshold': 0.90,  # Reset to reference topology when max_rho ≤ this value (0.90 = 90% load)
     'topology_reset_method': 'reco_agent',  # 'reco_agent' or 'manual' - how to reset topology to reference
 
     # Grid operation parameters

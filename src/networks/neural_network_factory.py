@@ -58,8 +58,26 @@ class NeuralNetworkFunctions:
         return self._module.train_neural_network(neural_network, training_examples, config)
     
     def encode_observation_simple(self, obs):
-        """Encode observation using the chosen implementation."""
+        """Encode observation using the chosen implementation (legacy method)."""
         return self._module.encode_observation_simple(obs)
+    
+    def encode_observation(self, obs, config=None, env=None):
+        """Unified observation encoder that chooses between custom and gym-based encoding."""
+        # Check if the module has the new unified encoder
+        if hasattr(self._module, 'encode_observation'):
+            return self._module.encode_observation(obs, config, env)
+        else:
+            # Fallback to simple encoder for backward compatibility
+            return self._module.encode_observation_simple(obs)
+    
+    def get_observation_size(self, env, config=None):
+        """Get observation size for given environment and config."""
+        if hasattr(self._module, 'get_observation_size'):
+            return self._module.get_observation_size(env, config)
+        else:
+            # Fallback - use sample observation
+            obs = env.reset()
+            return len(self._module.encode_observation_simple(obs))
 
 
 def get_neural_network_functions(config: Dict[str, Any]) -> NeuralNetworkFunctions:

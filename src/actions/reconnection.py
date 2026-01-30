@@ -1,6 +1,9 @@
 """
 Line Reconnection Module
 
+Handles intelligent line reconnections using Grid2Op's RecoPowerlineAgent.
+This module provides utilities for reconnecting disconnected lines when safe.
+
 Automatically attempts to reconnect disconnected powerlines after topology actions.
 Lines can be disconnected due to:
 - Overloads (automatic protection)
@@ -11,13 +14,38 @@ This module provides utilities to:
 1. Detect disconnected lines
 2. Check if reconnection is allowed (cooldown expired)
 3. Attempt reconnection as a post-processing step
+4. Use intelligent Grid2Op agents for optimal reconnection decisions
 
 Strategy:
 - After each topology action, check for disconnected lines
 - Try to reconnect lines that are off cooldown
 - Prioritize lines by importance (e.g., high capacity, critical connections)
+- Use RecoPowerlineModule for intelligent reconnection decisions
 """
 from typing import List, Tuple, Optional
+import numpy as np
+from grid2op.Agent import RecoPowerlineAgent
+
+# Try to import module wrappers
+try:
+    from grid2op.Agent import BaseModule
+    HAS_MODULES = True
+except ImportError:
+    HAS_MODULES = False
+
+if HAS_MODULES:
+    class RecoPowerlineModule(BaseModule, RecoPowerlineAgent):
+        """Module wrapper for RecoPowerlineAgent for line reconnections."""
+        def __init__(self, action_space):
+            RecoPowerlineAgent.__init__(self, action_space)
+            BaseModule.__init__(self, action_space)
+            
+        def get_act(self, observation, base_action=None, reward=0.0):
+            """Standardized interface for getting reconnection action."""
+            return self.act(observation, reward, done=False)
+else:
+    # Fallback if modules not available
+    RecoPowerlineModule = RecoPowerlineAgent
 import numpy as np
 
 

@@ -11,6 +11,14 @@ import numpy as np
 from torch.utils.data import DataLoader, TensorDataset
 from .neural_network_interface_minimal import NeuralNetworkInterface
 
+# Try to import gym dependencies for traditional observation space
+try:
+    from grid2op.gym_compat import GymEnv, BoxGymObsSpace
+    GYM_AVAILABLE = True
+except ImportError:
+    GYM_AVAILABLE = False
+    print("Warning: Grid2Op gym compatibility not available. Only custom observation encoding supported.")
+
 
 def encode_observation_simple(obs):
     """
@@ -70,11 +78,6 @@ def encode_observation_simple(obs):
             features.extend(all_topo)
             topo_size = len(all_topo)
         
-        # Debug output - show actual dimensions
-        total_features = len(features)
-        print(f"🔍 ENCODING DEBUG: n_lines={n_lines}, topo_size={topo_size}, total_features={total_features}")
-        print(f"   Breakdown: rho({n_lines}) + status({n_lines}) + cooldowns({n_lines}) + topology({topo_size}) = {total_features}")
-        
         # Total: 3*n_line + topo_vect_size features (depends on environment)
         return np.array(features, dtype=np.float32)
         
@@ -82,6 +85,140 @@ def encode_observation_simple(obs):
         # Encoding failed - this should not happen in normal operation
         print(f"⚠️ Critical: Observation encoding failed: {e}")
         raise RuntimeError(f"Cannot encode observation: {e}. Check environment compatibility.")
+
+
+def encode_observation_gym(obs, env, obs_attr_to_keep=None, normalize=True):
+    """
+    Encode observation using traditional gym-based approach (like stable-baselines3).
+    
+    This provides a more standard RL observation space that includes various grid attributes
+    in a flattened vector format, similar to what's used in traditional RL environments.
+    
+    Parameters:
+    -----------
+    obs : grid2op.Observation
+        Grid2Op observation object
+    env : grid2op.Environment
+        Grid2Op environment (used for gym space setup)
+    obs_attr_to_keep : list, optional
+        List of observation attributes to include. If None, uses default set.
+    normalize : bool
+        Whether to normalize the observation values
+        
+    Returns:
+    --------
+    state_vector : np.ndarray
+        Encoded state vector for neural network (dynamic size based on attributes)
+    """
+    if not GYM_AVAILABLE:
+        raise ImportError("Grid2Op gym compatibility not available. Install with: pip install grid2op[gym]")
+    
+    try:
+        # Default observation attributes if not specified
+        if obs_attr_to_keep is None:
+            obs_attr_to_keep = ["day_of_week", "hour_of_day", "minute_of_hour", "prod_p", "prod_v", "load_p", "load_q",
+                               "actual_dispatch", "target_dispatch", "topo_vect", "time_before_cooldown_line",
+                               "time_before_cooldown_sub", "rho", "timestep_overflow", "line_status",
+                               "storage_power", "storage_charge"]
+        
+        # Create gym observation space if it doesn't exist
+        if not hasattr(env, '_gym_obs_space') or env._gym_obs_space is None:
+            env._gym_obs_space = BoxGymObsSpace(env.observation_space, attr_to_keep=obs_attr_to_keep)
+            if normalize:
+                for attr_nm in obs_attr_to_keep:
+                    try:
+                        env._gym_obs_space.normalize_attr(attr_nm)
+                    except:
+                        # Skip normalization if it fails for this attribute
+                        pass
+        
+        # Convert observation to gym format
+        gym_obs = env._gym_obs_space.to_gym(obs)
+        
+        # Flatten if needed (gym observation might be multi-dimensional)
+        if isinstance(gym_obs, (list, tuple)):
+            features = []
+            for item in gym_obs:
+                if isinstance(item, np.ndarray):
+                    features.extend(item.flatten())
+                else:
+                    features.append(float(item))
+            gym_obs = np.array(features, dtype=np.float32)
+        elif isinstance(gym_obs, np.ndarray):
+            gym_obs = gym_obs.flatten().astype(np.float32)
+        
+        # Return flattened gym observation
+        return gym_obs
+        
+    except Exception as e:
+        print(f"⚠️ Critical: Gym observation encoding failed: {e}")
+        raise RuntimeError(f"Cannot encode gym observation: {e}. Check gym compatibility.")
+
+
+def encode_observation(obs, config=None, env=None):
+    """
+    Unified observation encoder that chooses between custom and gym-based encoding.
+    
+    Parameters:
+    -----------
+    obs : grid2op.Observation
+        Grid2Op observation object
+    config : dict, optional
+        Configuration dictionary with observation space settings
+    env : grid2op.Environment, optional
+        Grid2Op environment (needed for gym encoding)
+        
+    Returns:
+    --------
+    state_vector : np.ndarray
+        Encoded state vector for neural network
+    """
+    if config is None:
+        config = {'obs_space_type': 'custom'}
+    
+    obs_space_type = config.get('obs_space_type', 'custom')
+    
+    if obs_space_type == 'gym':
+        if env is None:
+            raise ValueError("Environment is required for gym-based observation encoding")
+        obs_attr_to_keep = config.get('gym_obs_attr_to_keep', None)
+        normalize = config.get('gym_obs_normalize', True)
+        return encode_observation_gym(obs, env, obs_attr_to_keep, normalize)
+    else:
+        return encode_observation_simple(obs)
+
+
+def get_observation_size(env, config=None):
+    """
+    Get the observation size for a given environment and configuration.
+    
+    Parameters:
+    -----------
+    env : grid2op.Environment
+        Grid2Op environment
+    config : dict, optional
+        Configuration dictionary with observation space settings
+        
+    Returns:
+    --------
+    int : Size of the observation vector
+    """
+    if config is None:
+        config = {'obs_space_type': 'custom'}
+        
+    obs_space_type = config.get('obs_space_type', 'custom')
+    
+    # Get a sample observation to determine size
+    obs = env.reset()
+    
+    if obs_space_type == 'gym':
+        sample_encoded = encode_observation_gym(obs, env, 
+                                              config.get('gym_obs_attr_to_keep', None),
+                                              config.get('gym_obs_normalize', True))
+    else:
+        sample_encoded = encode_observation_simple(obs)
+    
+    return len(sample_encoded)
 
 
 def create_neural_network(input_size, num_actions, config):

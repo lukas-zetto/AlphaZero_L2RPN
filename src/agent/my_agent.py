@@ -184,7 +184,7 @@ class MyCustomAgent(BaseAgent):
         
         if not grid_state['needs_intervention']:
             # PRIORITY 2: If grid is very safe, reset topology to reference
-            reset_threshold = self.config.get('topology_reset_threshold', 0.75)
+            reset_threshold = self.config.get('topology_reset_threshold', 0.90)
             if max_rho <= reset_threshold:
                 reset_action = self._reset_topology_if_modified(observation)
                 if reset_action is not None:
@@ -253,13 +253,10 @@ class MyCustomAgent(BaseAgent):
     
     def _auto_reconnect_lines(self, observation):
         """
-        Automatically reconnect disconnected lines when cooldown ends.
+        Automatically reconnect disconnected lines using RecoPowerlineModule.
         
-        This handles the case where:
-        - Grid2Op auto-disconnected a line due to persistent overload
-        - OR we manually disconnected a line
-        - Cooldown period has ended (time_before_cooldown_line == 0)
-        - Line can now be safely reconnected
+        This uses Grid2Op's intelligent RecoPowerlineModule which determines
+        the best line reconnections based on grid state.
         
         Parameters:
         -----------
@@ -271,20 +268,46 @@ class MyCustomAgent(BaseAgent):
         action : Action or None
             Reconnection action if a line should be reconnected, None otherwise
         """
-        # Find disconnected lines with no cooldown
-        disconnected = np.where(observation.line_status == False)[0]
-        
-        for line_id in disconnected:
-            # Check if cooldown has ended
-            if observation.time_before_cooldown_line[line_id] == 0:
-                # Reconnect this line
-                action = self.action_space()
-                action.line_set_status = [(line_id, 1)]  # 1 = reconnect
-                print(f"   🔌 Auto-reconnecting line {line_id} (cooldown ended)")
-                return action
-        
-        # No lines need reconnection
-        return None
+        try:
+            from actions.reconnection import RecoPowerlineModule
+            
+            # Only try to reconnect if there are disconnected lines
+            disconnected = np.where(observation.line_status == False)[0]
+            if len(disconnected) == 0:
+                return None
+            
+            # Use environment with full action space for line reconnections
+            env_to_use = self.current_env or self._baseline_env
+            if env_to_use is None:
+                return None
+                
+            # Use RecoPowerlineModule to intelligently reconnect lines
+            if RecoPowerlineModule is not None:
+                reconnect_agent = RecoPowerlineModule(env_to_use.action_space)
+                reconnect_action = reconnect_agent.get_act(observation, base_action=None, reward=0.0)
+                
+                # Check if this is actually a reconnection action (not do-nothing)
+                if hasattr(reconnect_action, 'line_set_status') and reconnect_action.line_set_status is not None:
+                    reconnections = [(i, status) for i, status in reconnect_action.line_set_status if status == 1]
+                    if len(reconnections) > 0:
+                        print(f"   🔌 RecoPowerlineModule reconnecting {len(reconnections)} line(s): {[i for i, _ in reconnections]}")
+                        return reconnect_action
+                
+                # If RecoPowerlineModule returned do-nothing, don't reconnect anything
+                return None
+            else:
+                # Fallback to manual reconnection if module not available
+                for line_id in disconnected:
+                    if observation.time_before_cooldown_line[line_id] == 0:
+                        action = self.action_space()
+                        action.line_set_status = [(line_id, 1)]
+                        print(f"   🔌 Manual reconnecting line {line_id} (cooldown ended)")
+                        return action
+                return None
+                
+        except Exception as e:
+            print(f"   ⚠️ Line reconnection failed: {e}")
+            return None
     
     def _reset_topology_if_modified(self, observation):
         """

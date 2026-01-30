@@ -2,12 +2,14 @@
 """
 Neural Network Interface - Minimal Version
 
-True interface defining only the 4 functions actually called from outside neural_network.py:
+True interface defining only the functions actually called from outside neural_network.py:
 
 1. create_neural_network() - Factory to create neural network instances
 2. neural_network_forward() - Forward pass for action probabilities + value
 3. train_neural_network() - Train network on batch of examples  
-4. encode_observation_simple() - Convert Grid2Op obs to state vector
+4. encode_observation_simple() - Convert Grid2Op obs to state vector (legacy)
+5. encode_observation() - Unified observation encoder (custom/gym)
+6. get_observation_size() - Get observation vector size
 
 Plus required PyTorch methods on neural network instances: .forward(), .train(), .eval()
 Plus required PyTorch methods called directly: .state_dict(), .load_state_dict()
@@ -64,5 +66,15 @@ def train_neural_network(neural_network: NeuralNetworkInterface, training_exampl
 
 
 def encode_observation_simple(obs) -> np.ndarray:
-    """Encode Grid2Op observation into neural network input."""
+    """Encode Grid2Op observation into neural network input (legacy method)."""
+    raise NotImplementedError("Import from neural_network.py")
+
+
+def encode_observation(obs, config=None, env=None) -> np.ndarray:
+    """Unified observation encoder that chooses between custom and gym-based encoding."""
+    raise NotImplementedError("Import from neural_network.py")
+
+
+def get_observation_size(env, config=None) -> int:
+    """Get the observation vector size for given environment and configuration."""
     raise NotImplementedError("Import from neural_network.py")

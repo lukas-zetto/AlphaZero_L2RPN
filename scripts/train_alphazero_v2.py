@@ -21,7 +21,7 @@ import traceback
 
 from actions.action_catalog import build_action_catalog
 from training.alphazero_mcts_v2 import run_mcts, select_action, MCTSNodeV2, collect_all_tree_nodes, compute_heuristic_value
-from networks.neural_network import create_neural_network, encode_observation_simple, neural_network_forward, train_neural_network
+from networks.neural_network import create_neural_network, encode_observation, encode_observation_simple, neural_network_forward, train_neural_network, get_observation_size
 
 # Suppress warnings in parallel workers
 warnings.filterwarnings("ignore")
@@ -43,7 +43,7 @@ def _parallel_episode_worker(args):
         from grid2op.Parameters import Parameters
         from actions.action_catalog import build_action_catalog
         from training.alphazero_mcts_v2 import run_mcts, select_action
-        from networks.neural_network import create_neural_network, encode_observation_simple, neural_network_forward
+        from networks.neural_network import create_neural_network, encode_observation, encode_observation_simple, neural_network_forward
         
         # Create environment
         params = Parameters()
@@ -75,9 +75,9 @@ def _parallel_episode_worker(args):
         # Create neural network and load shared weights
         # Dynamically determine input size from environment
         dummy_obs = env.reset()
-        from networks.neural_network import encode_observation_simple
-        dummy_encoded = encode_observation_simple(dummy_obs)
-        input_size = len(dummy_encoded)
+        from networks.neural_network import encode_observation, get_observation_size
+        # Use new unified size calculation
+        input_size = get_observation_size(env_copy, config)
         num_actions = len(catalog.actions)
         print(f"🔍 WORKER {worker_id}: Dynamic input_size={input_size}, num_actions={num_actions}")
         
@@ -233,7 +233,7 @@ def _parallel_episode_worker(args):
                         mcts_policy = np.ones(num_actions) / num_actions
                 
                 # Store training example
-                state_vector = encode_observation_simple(obs)
+                state_vector = encode_observation(obs, self.config, self.env)
                 root_value = root.value()
                 episode_data.append({
                     'state': state_vector,
@@ -324,12 +324,10 @@ class AlphaZeroTrainerV2:
         self.config = config
         self.use_replay_buffer = config.get('use_replay_buffer', True)
         # Create neural network with dynamic input size
-        # Determine input size from actual environment observation
-        dummy_obs = env.reset()
-        dummy_encoded = encode_observation_simple(dummy_obs)
-        self.input_size = len(dummy_encoded)  # Dynamic based on actual environment
+        # Determine input size from actual environment observation using unified method
+        self.input_size = get_observation_size(env, config)  # Dynamic based on config and environment
         self.num_actions = len(action_catalog.actions)
-        print(f"🔍 TRAINER: Dynamic input_size={self.input_size}, num_actions={self.num_actions}")
+        print(f"🔍 TRAINER: Dynamic input_size={self.input_size}, num_actions={self.num_actions}, obs_type={config.get('obs_space_type', 'custom')}")
         self.neural_network = create_neural_network(
             input_size=self.input_size,
             num_actions=self.num_actions,
@@ -475,11 +473,11 @@ class AlphaZeroTrainerV2:
             # Only run MCTS if in critical state
             if not is_critical:
                 # Check if we should reset topology to reference when safe
-                reset_threshold = self.config.get('topology_reset_threshold', 0.75)
+                reset_threshold = self.config.get('topology_reset_threshold', 0.90)
                 if max_rho <= reset_threshold:
                     from actions.topology_reset import get_reference_topology_action
                     try:
-                        reset_action = get_reference_topology_action(obs, self.env.action_space)
+                        reset_action = get_reference_topology_action(obs, self.env)
                         # Check if this is actually a reset (not do-nothing)
                         # For now, just apply it
                         print(f"  🔄 Grid is very safe (rho={max_rho:.3f} ≤ {reset_threshold}) - resetting to reference topology")
@@ -710,7 +708,7 @@ class AlphaZeroTrainerV2:
             
             if value_method == 'mcts_root':
                 # Original: Use MCTS Q-value from root node only
-                state_vector = encode_observation_simple(obs)
+                state_vector = encode_observation(obs, self.config, self.env)
                 root_value = root.value()
                 episode_data.append({
                     'state': state_vector,
@@ -721,7 +719,7 @@ class AlphaZeroTrainerV2:
                 
             elif value_method == 'binary_root':
                 # Original: Use binary outcome from root node only (set after episode)
-                state_vector = encode_observation_simple(obs)
+                state_vector = encode_observation(obs, self.config, self.env)
                 episode_data.append({
                     'state': state_vector,
                     'policy': mcts_policy,
@@ -731,14 +729,14 @@ class AlphaZeroTrainerV2:
                 
             elif value_method == 'mcts_all_nodes':
                 # Use MCTS Q-values from ALL tree nodes
-                all_nodes_data = collect_all_tree_nodes(root, encode_observation_simple)
+                all_nodes_data = collect_all_tree_nodes(root, lambda obs: encode_observation(obs, self.config, self.env))
                 episode_data.extend(all_nodes_data)
                 print(f"  📦 Collected {len(all_nodes_data)} nodes from MCTS tree (depths 0-{max([d['depth'] for d in all_nodes_data])})")
                 
             elif value_method == 'binary_all_nodes':
                 # PROPER ALPHAZERO: Collect ALL tree nodes, label with final episode outcome
                 # This is how AlphaZero actually works (Go/Chess/Shogi)
-                all_nodes_data = collect_all_tree_nodes(root, encode_observation_simple)
+                all_nodes_data = collect_all_tree_nodes(root, lambda obs: encode_observation(obs, self.config, self.env))
                 # Set placeholder values (will be updated after episode completes)
                 for data in all_nodes_data:
                     data['value'] = 0.0  # Placeholder
@@ -749,7 +747,7 @@ class AlphaZeroTrainerV2:
             elif value_method == 'heuristic':
                 # Heuristic mode: Only train policy, not value
                 # Value is computed via heuristic formula, not learned
-                state_vector = encode_observation_simple(obs)
+                state_vector = encode_observation(obs, self.config, self.env)
                 episode_data.append({
                     'state': state_vector,
                     'policy': mcts_policy,
@@ -1408,6 +1406,9 @@ def main():
         'min_learning_rate': AGENT_CONFIG['min_learning_rate'],
         'weight_decay': AGENT_CONFIG['weight_decay'],
         'training_epochs': get_config_value('training_epochs', AGENT_CONFIG['training_epochs']),
+        
+        # Topology reset parameters (ADD THIS!)
+        'topology_reset_threshold': get_config_value('topology_reset_threshold', AGENT_CONFIG.get('topology_reset_threshold', 0.90)),
         
         # Loss weights
         'policy_weight': get_config_value('policy_weight', AGENT_CONFIG.get('policy_weight', 3.0)),

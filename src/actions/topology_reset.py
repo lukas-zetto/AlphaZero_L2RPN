@@ -2,7 +2,7 @@
 Topology Reset Module
 
 Resets the grid topology to the reference (initial) configuration when the grid
-is in a safe state (max line load ≤ 0.75). This helps the agent return to a
+is in a safe state (max line load ≤ 0.90). This helps the agent return to a
 known-good baseline topology after successfully resolving overloads.
 
 Benefits:
@@ -12,16 +12,94 @@ Benefits:
 """
 
 import numpy as np
-from grid2op.Agent import RecoPowerlineAgent
+
+# Try to import module wrappers
+try:
+    from actions.base_module import BaseModule, GreedyModule
+    from grid2op.Action import ActionSpace
+    HAS_MODULES = True
+except ImportError:
+    try:
+        # Fallback to grid2op imports if available
+        from grid2op.Agent.base_module import BaseModule, GreedyModule
+        from grid2op.Action import ActionSpace
+        HAS_MODULES = True
+    except ImportError:
+        HAS_MODULES = False
+
+if HAS_MODULES:
+    class RecoverInitTopoModule(GreedyModule):
+        """Module for initial topology recovering.
+        This module will perform the best action to recover initial topology by changing bus
+        (single action, do not support multiple sub-zone actions)
+        """
+
+        def __init__(self, action_space: ActionSpace):
+            GreedyModule.__init__(self, action_space)
+
+        def _get_tested_action(self, observation):
+            # Get the list of possible actions to revert the grid's topology to its reference state.
+            tested_action = self.action_space.get_back_to_ref_state(observation).get(
+                "substation", None
+            )
+            if tested_action is not None:
+                print(f"🔍 Raw topology reset actions found: {len(tested_action)}")
+                tested_action = [
+                    act
+                    for act in tested_action
+                    if (
+                        observation.time_before_cooldown_sub[
+                            int(act.as_dict()["set_bus_vect"]["modif_subs_id"][0])
+                        ]
+                        == 0
+                    )
+                ]
+                print(f"🔍 Actions after cooldown filter: {len(tested_action)} available for GreedyModule")
+                return tested_action
+            else:
+                print("🔍 No topology reset actions found by get_back_to_ref_state")
+                return []
+
+        def get_act(self, observation, base_action, reward, done=False, **kwargs):
+            """Override GreedyModule to bypass strict simulation for topology reset"""
+            tested_actions = self._get_tested_action(observation)
+            
+            if not tested_actions:
+                print("🔍 No topology reset actions available")
+                return self.action_space()
+            
+            print(f"🔍 GreedyModule simulating {len(tested_actions)} topology reset actions...")
+            
+            # For topology reset, we don't need strict reward optimization
+            # Just pick the first action that doesn't cause errors
+            for i, action in enumerate(tested_actions):
+                try:
+                    simul_obs, simul_reward, simul_has_error, simul_info = observation.simulate(action + (base_action or self.action_space()))
+                    
+                    if not simul_has_error and len(simul_info["exception"]) == 0:
+                        print(f"🔍 Topology reset action {i}: rho {observation.rho.max():.3f} -> {simul_obs.rho.max():.3f}, reward={simul_reward:.3f}")
+                        return action
+                    else:
+                        print(f"🔍 Topology reset action {i}: simulation failed - error={simul_has_error}, exceptions={len(simul_info['exception'])}")
+                        
+                except Exception as e:
+                    print(f"🔍 Topology reset action {i}: simulation exception - {e}")
+                    
+            # If all actions failed, return do-nothing
+            print("🔍 All topology reset actions failed - returning do-nothing")
+            return self.action_space()
+else:
+    # Fallback if modules not available
+    RecoverInitTopoModule = None
 
 
-def should_reset_topology(observation, safe_threshold=0.75):
+def should_reset_topology(observation, safe_threshold=0.90):
     """
     Check if the grid should be reset to reference topology.
     
     Args:
         observation: Grid2Op observation
-        safe_threshold: Maximum rho threshold to consider "safe" (default 0.75)
+        safe_threshold: Maximum rho threshold to consider "safe" (default 0.90)
     
     Returns:
         bool: True if grid is safe enough to reset, False otherwise
@@ -43,12 +121,74 @@ def create_reset_action(observation, env, method='reco_agent'):
         Grid2Op action that resets topology appropriately
     """
     if method == 'reco_agent':
-        # Use Grid2Op's built-in reset agent with full action space (including line switching)
-        # Our trained model uses a limited bus-only action space, but RecoPowerlineAgent
-        # specifically needs line reconnection capabilities
+        # Use RecoverInitTopoModule for topology reset to reference state
         full_action_space = env.action_space
-        reset_agent = RecoPowerlineAgent(full_action_space)
-        return reset_agent.act(observation, reward=None, done=False)
+        if RecoverInitTopoModule is not None:
+            reset_agent = RecoverInitTopoModule(full_action_space)
+            print(f"🔍 RecoverInitTopoModule input: rho_max={observation.rho.max():.3f}")
+            reset_action = reset_agent.get_act(observation, base_action=None, reward=0.0)
+            
+            # Handle case where GreedyModule returns None (no beneficial action found)
+            if reset_action is None:
+                print(f"🔍 RecoverInitTopoModule: no beneficial reset found, using do-nothing")
+                reset_action = full_action_space()
+            else:
+                print(f"🔍 RecoverInitTopoModule output: action type={type(reset_action)}")
+        else:
+            # If RecoverInitTopoModule not available, return do-nothing action
+            print("⚠️ RecoverInitTopoModule not available, skipping topology reset")
+            reset_action = full_action_space()
+        
+        # Debug: Show what substation(s) this action affects
+        try:
+            if hasattr(reset_action, 'get_topological_impact'):
+                topo_impact = reset_action.get_topological_impact()
+                modified_subs = [i for i, changed in enumerate(topo_impact) 
+                               if (np.any(changed) if hasattr(changed, '__len__') else changed)]
+                if modified_subs:
+                    if RecoverInitTopoModule is not None:
+                        print(f"🔄 RecoverInitTopoModule reset affecting substations: {modified_subs}")
+                    else:
+                        print(f"🔄 Manual reset affecting substations: {modified_subs}")
+                else:
+                    if RecoverInitTopoModule is not None:
+                        print("🔄 RecoverInitTopoModule: no topology changes (do-nothing action)")
+                    else:
+                        print("🔄 Manual reset: no topology changes (do-nothing action)")
+            else:
+                # Fallback: check set_bus and line status changes
+                changes = []
+                if hasattr(reset_action, 'set_bus') and reset_action.set_bus is not None:
+                    # Handle both scalar and array bus assignments
+                    set_bus = reset_action.set_bus
+                    if hasattr(set_bus, '__len__'):
+                        bus_changes = [i for i, bus in enumerate(set_bus) if (np.any(bus) if hasattr(bus, '__len__') else bus) != 0]
+                    else:
+                        bus_changes = [0] if set_bus != 0 else []
+                    if bus_changes:
+                        changes.append(f"bus changes: {len(bus_changes)} elements")
+                        
+                if hasattr(reset_action, 'set_line_status') and reset_action.set_line_status is not None:
+                    # Handle line status changes
+                    set_line_status = reset_action.set_line_status
+                    if hasattr(set_line_status, '__len__'):
+                        line_changes = [i for i, status in enumerate(set_line_status) if (np.any(status) if hasattr(status, '__len__') else status) != 0]
+                    else:
+                        line_changes = [0] if set_line_status != 0 else []
+                    if line_changes:
+                        changes.append(f"line status: {len(line_changes)} lines")
+                
+                if changes:
+                    module_name = "RecoverInitTopoModule" if RecoverInitTopoModule is not None else "Manual reset"
+                    print(f"🔄 {module_name}: {', '.join(changes)}")
+                else:
+                    module_name = "RecoverInitTopoModule" if RecoverInitTopoModule is not None else "Manual reset"
+                    print(f"🔄 {module_name}: no changes detected (do-nothing action)")
+        except Exception as e:
+            module_name = "RecoverInitTopoModule" if RecoverInitTopoModule is not None else "Manual reset"
+            print(f"🔄 {module_name}: reset action created (debug failed: {e})")
+        
+        return reset_action
     
     elif method == 'manual':
         # Use manual topology reset approach
