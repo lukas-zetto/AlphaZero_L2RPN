@@ -199,8 +199,8 @@ def parse_metrics_from_log(log_file):
     return survival_rate, survived_episodes, avg_steps, total_episodes
 
 def main():
-    checkpoint_dir = "/workspace/checkpoints_mcts_root"
-    output_dir = "/workspace/evaluation_results_mcts_root"
+    checkpoint_dir = "/workspace/checkpoints_heuristic_full_run"
+    output_dir = "/workspace/evaluation_results_full_run"
     os.makedirs(output_dir, exist_ok=True)
     results_file = os.path.join(output_dir, "checkpoint_evaluations.json")
 
@@ -227,7 +227,7 @@ def main():
         print(f"\nEvaluating with {max_workers} parallel workers...\n")
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             future_to_checkpoint = {
-                executor.submit(evaluate_checkpoint, cp, "mcts_root"): cp 
+                executor.submit(evaluate_checkpoint, cp, "full_run"): cp 
                 for cp in checkpoints_to_eval
             }
             for future in as_completed(future_to_checkpoint):
@@ -392,7 +392,7 @@ if __name__ == "__main__":
 
     if args.plot_only:
         # Only plot from saved results
-        output_dir = "/workspace/evaluation_results_mcts_root"
+        output_dir = "/workspace/evaluation_results_full_run"
         results_file = os.path.join(output_dir, "checkpoint_evaluations.json")
         if not os.path.exists(results_file):
             print(f"No saved results found at {results_file}")

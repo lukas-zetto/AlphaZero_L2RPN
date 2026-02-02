@@ -21,8 +21,7 @@ import numpy as np
 import queno
 
 
-class RBM(ABC):
-    """Interface defining required methods for neural network instances."""
+class RBM():
 
     def __init__(self, config: Dict[str, Any]):
         self.config = config
@@ -59,7 +58,7 @@ class RBM(ABC):
 # Function signatures 
 def create_neural_network(input_size: int, num_actions: int, config: Dict[str, Any]) -> RBM:
     network = RBM(config) 
-    return 
+    return network
 
 
 def neural_network_forward(rbm, obs, num_actions: int) -> Tuple[np.ndarray, float]:

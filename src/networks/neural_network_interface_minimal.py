@@ -37,16 +37,9 @@ class NeuralNetworkInterface(ABC):
     def eval(self):
         """Set network to evaluation mode."""
         pass
-    
-    @abstractmethod
-    def state_dict(self):
-        """Get model weights."""
-        pass
-    
-    @abstractmethod
-    def load_state_dict(self, state_dict):
-        """Load model weights."""
-        pass
+
+
+
 
 
 # Function signatures (implementations in neural_network.py)
@@ -77,4 +70,14 @@ def encode_observation(obs, config=None, env=None) -> np.ndarray:
 
 def get_observation_size(env, config=None) -> int:
     """Get the observation vector size for given environment and configuration."""
+    raise NotImplementedError("Import from neural_network.py")
+
+
+def save_model(neural_network: 'NeuralNetworkInterface', filepath: str):
+    """Save complete model to file."""
+    raise NotImplementedError("Import from neural_network.py")
+
+
+def load_model(filepath: str) -> 'NeuralNetworkInterface':
+    """Load complete model from file."""
     raise NotImplementedError("Import from neural_network.py")

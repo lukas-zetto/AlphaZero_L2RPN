@@ -478,14 +478,8 @@ class MyCustomAgent(BaseAgent):
         """
         if self.neural_network is not None:
             try:
-                import torch
-                # Save model state dict
-                torch.save({
-                    'model_state_dict': self.neural_network.state_dict(),
-                    'config': self.config,
-                    'input_size': getattr(self.neural_network, 'input_size', None),
-                    'output_size': getattr(self.neural_network, 'output_size', None)
-                }, filepath)
+                # Use interface method - works with any implementation (AlphaZero, RBM, etc.)
+                self.neural_network.save_model(filepath)
                 print(f"✅ Model saved to: {filepath}")
             except Exception as e:
                 print(f"❌ Model save failed: {e}")
@@ -502,52 +496,12 @@ class MyCustomAgent(BaseAgent):
             Path to the saved model
         """
         try:
-            import torch
-            from src.networks.neural_network_factory import get_neural_network_functions
+            from src.networks.neural_network import load_neural_network
             
-            # Get functions for current implementation
-            nn_funcs = get_neural_network_functions(self.config)
-            
-            # Load checkpoint
-            checkpoint = torch.load(filepath, map_location='cpu')
-            
-            # Create neural network if not exists
-            if self.neural_network is None:
-                # Detect the correct number of actions from the saved model
-                if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-                    state_dict = checkpoint['model_state_dict']
-                else:
-                    state_dict = checkpoint
-                
-                # Get the number of actions from the policy head shape
-                if 'policy_head.weight' in state_dict:
-                    num_actions = checkpoint['num_actions']
-                    print(f"🔍 Detected {num_actions} actions from saved model")
-                else:
-                    raise ValueError("Checkpoint must contain 'num_actions' field")
-                
-                input_size = self.config['input_size']
-                
-                self.neural_network = nn_funcs.create_neural_network(
-                    input_size=input_size,
-                    num_actions=num_actions,
-                    config=self.config
-                )
-            
-            # Handle different checkpoint formats
-            if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-                # Standard format with wrapper
-                state_dict = checkpoint['model_state_dict']
-            else:
-                # Direct state dict format (from Alpha Zero training)
-                state_dict = checkpoint
-            
-            # Load state dict
-            self.neural_network.load_state_dict(state_dict)
-            self.neural_network.eval()  # Set to evaluation mode
-            
+            # Use standalone loading function - no need to create empty network first!
+            self.neural_network = load_neural_network(filepath)
             print(f"✅ Model loaded from: {filepath}")
-            print(f"✅ Using trained Alpha Zero weights!")
+            print(f"✅ Ready for inference!")
             
         except Exception as e:
             print(f"❌ Model load failed: {e}")
