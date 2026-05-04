@@ -7,11 +7,16 @@ import os
 import sys
 import json
 import numpy as np
+import torch
 import grid2op
 from lightsim2grid import LightSimBackend
 from grid2op.Agent import DoNothingAgent
 
-# Add project root to path
+# Add the same path setup as training script (this works reliably)
+sys.path.append('/workspace/src')  # For direct imports like 'from networks.neural_network_factory'
+sys.path.append('/workspace')      # For src-prefixed imports like 'from src.networks.neural_network_factory'
+
+# Add project root to path (backup approach)
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, project_root)
 sys.path.insert(0, os.path.join(project_root, 'src'))
@@ -19,6 +24,73 @@ sys.path.insert(0, os.path.join(project_root, 'src'))
 from src.agent.my_agent import MyCustomAgent
 from src.rewards.custom_reward import MyCustomReward
 from src.config import AGENT_CONFIG, ENV_CONFIG, EVAL_CONFIG, ACTIONS_CONFIG, TRAINING_CONFIG
+from src.config import USE_REDUCED_ACTION_SPACE, REDUCED_ACTIONS
+
+# No additional config extraction needed - using direct imports
+
+
+def detect_model_config(model_path):
+    """Auto-detect observation and action space configuration from model dimensions"""
+    
+    # Load model and get dimensions
+    try:
+        checkpoint = torch.load(model_path, map_location='cpu')
+        
+        # Try direct access to saved dimensions first (newer checkpoints)
+        if 'input_size' in checkpoint and 'num_actions' in checkpoint:
+            input_size = checkpoint['input_size']
+            num_actions = checkpoint['num_actions']
+        else:
+            # Fallback to parsing model weights (older checkpoints)
+            if 'model_state_dict' in checkpoint:
+                state_dict = checkpoint['model_state_dict']
+            elif 'model' in checkpoint:
+                state_dict = checkpoint['model']  
+            else:
+                raise ValueError("Cannot find model weights in checkpoint")
+                
+            input_size = state_dict['trunk.0.weight'].shape[1] 
+            num_actions = state_dict['policy_head.weight'].shape[0]
+            
+    except Exception as e:
+        raise ValueError(f"Failed to load model from {model_path}: {e}")
+    
+    # Complete observation space mapping
+    OBS_SIZE_TO_TYPE = {
+        20: 'minimal',     # Only rho values
+        114: 'essential',  # Power + topology basics  
+        117: 'custom',     # Full feature set
+        200: 'gym',        # Traditional RL approach
+    }
+    
+    # Complete action space mapping  
+    ACTIONS_TO_REDUCTION = {
+        82: 'N1',          # Most restrictive
+        141: 'N0',         # Medium restrictive
+        203: 'SYM',        # Least restrictive
+    }
+    
+    obs_space_type = OBS_SIZE_TO_TYPE.get(input_size)
+    reduction = ACTIONS_TO_REDUCTION.get(num_actions)
+    
+    if not obs_space_type:
+        raise ValueError(f"Unknown observation size: {input_size}. Known sizes: {list(OBS_SIZE_TO_TYPE.keys())}")
+    if not reduction:
+        raise ValueError(f"Unknown action count: {num_actions}. Known counts: {list(ACTIONS_TO_REDUCTION.keys())}")
+        
+    detected_config = {
+        'obs_space_type': obs_space_type,
+        'reduction': reduction,
+        'drop_identity': False,        
+        'include_do_nothing': True,    
+        'substations': list(range(14))
+    }
+    
+    print(f"🔍 Auto-detected model configuration:")
+    print(f"  📊 Observation space: {obs_space_type} ({input_size} features)")
+    print(f"  🎯 Action space: {reduction} ({num_actions} actions)")
+    
+    return detected_config
 
 
 def get_test_scenarios(env, max_episodes=None):
@@ -248,15 +320,80 @@ def create_agent(env, agent_config):
         return DoNothingAgent(env.action_space)
     elif agent_type == 'custom':
         print("Creating MyCustomAgent")
-        # Merge ACTIONS_CONFIG into agent_config
-        full_config = {**agent_config, 'ACTIONS_CONFIG': ACTIONS_CONFIG}
+        
+        # Auto-detect configuration from model if model_path is available
+        model_path = agent_config.get('model_path')
+        if model_path and os.path.exists(model_path):
+            try:
+                detected_config = detect_model_config(model_path)
+                
+                # Override ACTIONS_CONFIG with detected values
+                detected_actions_config = {
+                    **ACTIONS_CONFIG,
+                    'reduction': detected_config['reduction'],
+                    'drop_identity': detected_config['drop_identity'],
+                    'include_do_nothing': detected_config['include_do_nothing'],
+                    'substations': detected_config['substations']
+                }
+                
+                # Override agent_config with detected observation space
+                detected_agent_config = {
+                    **agent_config,
+                    'obs_space_type': detected_config['obs_space_type']
+                }
+                
+                # Override with environment variable if provided
+                env_obs_space_type = os.environ.get('OBS_SPACE_TYPE')
+                if env_obs_space_type:
+                    detected_agent_config['obs_space_type'] = env_obs_space_type
+                    print(f"🔧 Overriding observation space with: {env_obs_space_type}")
+                
+                print(f"✅ Using auto-detected configuration")
+                
+                # Use detected configs
+                full_config = {**detected_agent_config, 'ACTIONS_CONFIG': detected_actions_config}
+                
+            except Exception as e:
+                print(f"⚠️ Auto-detection failed: {e}")
+                print(f"📋 Falling back to default configuration")
+                # Fall back to original config
+                full_config = {**agent_config, 'ACTIONS_CONFIG': ACTIONS_CONFIG}
+                
+                # Override with environment variable if provided
+                env_obs_space_type = os.environ.get('OBS_SPACE_TYPE')
+                if env_obs_space_type:
+                    full_config['obs_space_type'] = env_obs_space_type
+                    print(f"🔧 Overriding observation space with: {env_obs_space_type}")
+        else:
+            # No model path or file doesn't exist - use default config
+            full_config = {**agent_config, 'ACTIONS_CONFIG': ACTIONS_CONFIG}
+            
+            # Override with environment variable if provided
+            env_obs_space_type = os.environ.get('OBS_SPACE_TYPE')
+            if env_obs_space_type:
+                full_config['obs_space_type'] = env_obs_space_type
+                print(f"🔧 Overriding observation space with: {env_obs_space_type}")
+        
         agent = MyCustomAgent(
             action_space=env.action_space,
             config=full_config
         )
+
+        # Required for gym/essential observation encodings during inference.
+        agent.set_env(env)
+        
+        # Set agent to test mode for fast inference (no MCTS)
+        agent.set_mode('test')
+        
+        # Set MCTS config so the agent can use proper observation encoding
+        agent.mcts_config = full_config
+        
+        # Set nn_funcs for fast neural network inference (required for test mode)
+        # IMPORTANT: Use the final full_config here so nn_funcs gets the detected obs_space_type
+        from src.networks.neural_network_factory import get_neural_network_functions
+        agent.nn_funcs = get_neural_network_functions(full_config)
         
         # Load trained model if available
-        model_path = agent_config.get('model_path')
         if model_path and os.path.exists(model_path):
             print(f"Loading model from: {model_path}")
             agent.load_model(model_path)
@@ -282,7 +419,7 @@ def compare_agents(env, scenarios=None, max_episodes=None):
     # Create both agents
     custom_config = {**AGENT_CONFIG, 'agent_type': 'custom'}
     
-    # Override model_path from environment variable if set (for Optuna trials)
+    # Override model_path from environment variable if set
     if 'MODEL_PATH' in os.environ:
         custom_config['model_path'] = os.environ['MODEL_PATH']
         print(f"📦 Using model from environment: {custom_config['model_path']}")
@@ -515,9 +652,18 @@ def main():
         print(f"\n=== SINGLE AGENT MODE ===")
         print(f"Agent type: {AGENT_CONFIG.get('agent_type', 'custom')}")
         
+        # Create agent config and override model_path from environment variable if set
+        agent_config = {**AGENT_CONFIG}
+        if 'MODEL_PATH' in os.environ:
+            agent_config['model_path'] = os.environ['MODEL_PATH']
+            print(f"📦 Using model from environment: {agent_config['model_path']}")
+            print(f"🔍 DEBUG: File exists: {os.path.exists(agent_config['model_path'])}")
+        else:
+            print("🔍 DEBUG: No MODEL_PATH in environment variables")
+        
         # Create agent based on config
         print("Creating agent...")
-        agent = create_agent(env, AGENT_CONFIG)
+        agent = create_agent(env, agent_config)
         
         # Run evaluation
         results = evaluate_on_scenarios(env, agent, max_episodes=max_episodes)
@@ -525,6 +671,19 @@ def main():
         # Compute and display statistics
         stats = compute_statistics(results)
         print_evaluation_report(stats, results)
+        
+        # Output detailed episode results for checkpoint evaluator
+        print("\nEPISODE_RESULTS_JSON:")
+        episode_results_json = []
+        for r in results:
+            episode_results_json.append({
+                'scenario_id': r['scenario_id'],
+                'steps': r['steps'],
+                'total_reward': r['total_reward'],
+                'survived': r['survived']
+            })
+        print(json.dumps(episode_results_json))
+        print("END_EPISODE_RESULTS_JSON")
         
         # Save results
         agent_type = AGENT_CONFIG.get('agent_type', 'custom')

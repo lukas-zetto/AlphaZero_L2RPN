@@ -87,6 +87,38 @@ def encode_observation_simple(obs):
         raise RuntimeError(f"Cannot encode observation: {e}. Check environment compatibility.")
 
 
+def encode_observation_minimal(obs):
+    """
+    MINIMAL observation encoding - ONLY line loadings (rho values).
+    
+    Tests the hypothesis that topology details are noise and only line loads matter.
+    This gives the absolute minimum information needed for grid management:
+    - Which lines are overloaded (rho > 1.0)
+    - How close other lines are to their limits
+    
+    Parameters:
+    -----------
+    obs : grid2op.Observation
+        Grid2Op observation object
+        
+    Returns:
+    --------
+    state_vector : np.ndarray
+        Minimal encoded state vector (only 20 features for l2rpn_case14_sandbox)
+    """
+    try:
+        # ONLY line loadings (rho) - the most critical information
+        if hasattr(obs, 'rho'):
+            rho_values = [float(x) for x in obs.rho]
+            return np.array(rho_values, dtype=np.float32)
+        else:
+            raise RuntimeError("No rho attribute in observation")
+            
+    except Exception as e:
+        print(f"⚠️ Critical: Minimal observation encoding failed: {e}")
+        raise RuntimeError(f"Cannot encode observation: {e}. Check environment compatibility.")
+
+
 def encode_observation_gym(obs, env, obs_attr_to_keep=None, normalize=True):
     """
     Encode observation using traditional gym-based approach (like stable-baselines3).
@@ -184,6 +216,14 @@ def encode_observation(obs, config=None, env=None):
         obs_attr_to_keep = config.get('gym_obs_attr_to_keep', None)
         normalize = config.get('gym_obs_normalize', True)
         return encode_observation_gym(obs, env, obs_attr_to_keep, normalize)
+    elif obs_space_type == 'essential':
+        if env is None:
+            raise ValueError("Environment is required for essential observation encoding")
+        obs_attr_to_keep = config.get('essential_obs_attr_to_keep', ["prod_p", "load_p", "rho", "timestep_overflow", "topo_vect"])
+        normalize = config.get('gym_obs_normalize', True)
+        return encode_observation_gym(obs, env, obs_attr_to_keep, normalize)
+    elif obs_space_type == 'minimal':
+        return encode_observation_minimal(obs)
     else:
         return encode_observation_simple(obs)
 
@@ -215,6 +255,12 @@ def get_observation_size(env, config=None):
         sample_encoded = encode_observation_gym(obs, env, 
                                               config.get('gym_obs_attr_to_keep', None),
                                               config.get('gym_obs_normalize', True))
+    elif obs_space_type == 'essential':
+        sample_encoded = encode_observation_gym(obs, env, 
+                                              config.get('essential_obs_attr_to_keep', ["prod_p", "load_p", "rho", "timestep_overflow", "topo_vect"]),
+                                              config.get('gym_obs_normalize', True))
+    elif obs_space_type == 'minimal':
+        sample_encoded = encode_observation_minimal(obs)
     else:
         sample_encoded = encode_observation_simple(obs)
     
@@ -259,7 +305,68 @@ def create_neural_network(input_size, num_actions, config):
     return network
 
 
-def neural_network_forward(neural_network, obs, num_actions, mask=None):
+def load_neural_network(filepath):
+    """
+    Load neural network from file automatically detecting type.
+    
+    This is a factory function that loads any saved neural network
+    without requiring you to create an empty object first.
+    
+    Parameters:
+    -----------
+    filepath : str
+        Path to the saved model file
+        
+    Returns:
+    --------
+    network : NeuralNetworkInterface
+        Loaded neural network ready for inference
+    """
+    import torch
+    
+    try:
+        checkpoint = torch.load(filepath, map_location='cpu')
+        
+        # Detect model type with explicit backward compatibility
+        model_type = checkpoint.get('model_type', None)
+        
+        if model_type == 'alphazero':
+            # Modern checkpoint with explicit type
+            pass
+        elif model_type is None and 'model_state_dict' in checkpoint:
+            # Legacy checkpoint without model_type - assume AlphaZero for backward compatibility
+            print("⚠️ Loading legacy checkpoint without model_type, assuming AlphaZero")
+            model_type = 'alphazero'
+        
+        if model_type == 'alphazero':
+            # Load AlphaZero model
+            if 'input_size' not in checkpoint or 'num_actions' not in checkpoint:
+                raise ValueError(f"AlphaZero checkpoint missing required fields: {filepath}")
+                
+            network = AlphaZeroNetwork(
+                input_size=checkpoint['input_size'],
+                num_actions=checkpoint['num_actions'],
+                hidden_size=checkpoint.get('hidden_size', 256)
+            )
+            network.load_state_dict(checkpoint['model_state_dict'])
+            network.eval()
+            
+            print(f"✅ AlphaZero model loaded from: {filepath}")
+            print(f"✅ Architecture: {checkpoint['input_size']} inputs -> {checkpoint['num_actions']} actions")
+            return network
+            
+        elif model_type == 'rbm':
+            # Load RBM model (implement when RBM is ready)
+            raise NotImplementedError("RBM loading not yet implemented")
+            
+        else:
+            raise ValueError(f"Unknown model type: {model_type}")
+            
+    except Exception as e:
+        raise RuntimeError(f"Failed to load neural network from {filepath}: {e}")
+
+
+def neural_network_forward(neural_network, obs, num_actions, mask=None, config=None, env=None):
     """
     Forward pass through shared neural network with policy and value heads.
     
@@ -271,6 +378,10 @@ def neural_network_forward(neural_network, obs, num_actions, mask=None):
         Grid2Op observation
     num_actions : int
         Number of valid actions
+    config : dict, optional
+        Configuration dict for observation encoding
+    env : grid2op.Environment, optional
+        Grid2Op environment (required for some observation encodings)
         
     Returns:
     --------
@@ -279,8 +390,8 @@ def neural_network_forward(neural_network, obs, num_actions, mask=None):
     value : float
         State value estimate
     """
-    # Encode observation to state vector (simple implementation)
-    state_vector = encode_observation_simple(obs)
+    # Encode observation to state vector using config-aware encoding
+    state_vector = encode_observation(obs, config, env)
     
     if neural_network is None:
         # Placeholder: return uniform policy and zero value
@@ -513,7 +624,7 @@ class ResidualBlock(nn.Module):
         return out
 
 
-class AlphaZeroNetwork(nn.Module, NeuralNetworkInterface):
+class AlphaZeroNetwork(nn.Module):
     """
     Alpha Zero neural network: shared trunk + policy head + value head
     (Single network with two outputs, as used in the original paper)
@@ -592,6 +703,15 @@ class AlphaZeroNetwork(nn.Module, NeuralNetworkInterface):
                 nn.init.zeros_(module.weight)
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
+        
+        # Initialize value head final layer to zeros for neutral value output (0.0)
+        # This ensures consistent neutral value estimates before training
+        if len(self.value_head) > 0:
+            final_value_layer = self.value_head[-1]  # Last layer in Sequential
+            if isinstance(final_value_layer, nn.Linear):
+                nn.init.zeros_(final_value_layer.weight)
+                if final_value_layer.bias is not None:
+                    nn.init.zeros_(final_value_layer.bias)
     
     def _count_parameters(self):
         """Count total number of trainable parameters"""
@@ -628,3 +748,15 @@ class AlphaZeroNetwork(nn.Module, NeuralNetworkInterface):
         value = self.value_head(shared_features)
         
         return policy_logits, value
+    
+    def save_model(self, filepath):
+        """Save the AlphaZero model using PyTorch format."""
+        import torch
+        torch.save({
+            'model_type': 'alphazero',  # Add type for auto-detection
+            'model_state_dict': self.state_dict(),
+            'input_size': self.input_size,
+            'num_actions': self.num_actions,
+            'hidden_size': self.hidden_size
+        }, filepath)
+        print(f"✅ AlphaZero model saved to: {filepath}")

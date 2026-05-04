@@ -9,18 +9,38 @@ import importlib
 # Reward mapping configuration
 REWARD_MAPPINGS = {
     'AlphaZero': {
-        'module': 'rewards.custom_reward',
-        'class': 'MyCustomReward'
+        'module': 'rewards.alphazero_reward',
+        'class': 'AlphaZeroReward'
     },
     'D3QN-2022': {
         'module': 'rewards.d3qn_reward',
         'class': 'D3QNSurvivalReward'
     },
-    # Add more reward mappings here as needed
-    # 'ActionBased': {
-    #     'module': 'action_reward',
-    #     'class': 'ActionReward'
-    # },
+    'D3QN-2020': {
+        'module': 'rewards.d3qn_2020_reward',
+        'class': 'D3QN2020Reward'
+    },
+    'Loss': {
+        'module': 'rewards.loss_reward',
+        'class': 'LossReward'
+    },
+    'MaxRho': {
+        'module': 'rewards.maxrho_reward',
+        'class': 'MaxRhoReward'
+    },
+    'PPO': {
+        'module': 'rewards.ppo_reward',
+        'class': 'PPO_Reward'
+    },
+    'LinesCapacity': {
+        'module': 'rewards.linescapacity_reward',
+        'class': 'LinesCapacityReward'
+    },
+    # Legacy mapping for backward compatibility
+    'custom': {
+        'module': 'rewards.custom_reward',
+        'class': 'MyCustomReward'
+    },
 }
 
 

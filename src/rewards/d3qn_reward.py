@@ -24,10 +24,14 @@ class D3QNSurvivalReward(BaseReward):
     without any complex reward shaping that might bias toward inaction.
     """
     
+    # Unique identifier for verification
+    REWARD_ID = "D3QN-2022-SURVIVAL"
+    REWARD_VERSION = "v1.0"
+    
     def __init__(self, logger=None):
         super().__init__(logger=logger)
         
-    def __call__(self, action, env, has_error, is_done, is_illegal, is_ambiguous):
+    def __call__(self, action, env, has_error, is_done, is_illegal, is_ambiguous, obs=None):
         """
         Compute the D3QN survival reward
         
@@ -45,6 +49,8 @@ class D3QNSurvivalReward(BaseReward):
             Whether the action was illegal
         is_ambiguous : bool
             Whether the action was ambiguous
+        obs : Observation, optional
+            Grid observation (if provided, avoids calling env.get_obs())
             
         Returns:
         --------

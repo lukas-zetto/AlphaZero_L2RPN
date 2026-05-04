@@ -15,7 +15,12 @@ import matplotlib.patches as mpatches
 from matplotlib.lines import Line2D
 import networkx as nx
 
-from src.config import AGENT_CONFIG, ENV_CONFIG, ACTIONS_CONFIG
+from src.config import MASTER_CONFIG
+
+# Extract configs from unified structure
+AGENT_CONFIG = MASTER_CONFIG['core_agent']
+ENV_CONFIG = MASTER_CONFIG['environment']
+ACTIONS_CONFIG = MASTER_CONFIG['actions']
 from src.actions.action_catalog import ActionCatalog
 from src.rewards.custom_reward import MyCustomReward
 from src.training.alphazero_mcts_v2 import MCTSNodeV2, run_mcts, compute_heuristic_value

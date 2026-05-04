@@ -20,9 +20,15 @@ project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, project_root)
 
 from src.agent.my_agent import MyCustomAgent
-from src.config import AGENT_CONFIG, ENV_CONFIG, LINE_LOGGING_CONFIG, ACTIONS_CONFIG
+from src.config import MASTER_CONFIG
 from src.training.line_load_logging import EpisodeLineLoadLogger
 from src.training.train_agent import collect_training_data
+
+# Extract configs from unified structure
+AGENT_CONFIG = MASTER_CONFIG['core_agent']
+ACTIONS_CONFIG = MASTER_CONFIG['actions']
+ENV_CONFIG = MASTER_CONFIG['environment']
+LINE_LOGGING_CONFIG = MASTER_CONFIG['line_logging']
 
 # Merge ACTIONS_CONFIG into AGENT_CONFIG for catalog support
 AGENT_CONFIG.update(ACTIONS_CONFIG)

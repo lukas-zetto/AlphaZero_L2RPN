@@ -38,7 +38,8 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'src'))
 
 try:
-    from src.config import AGENT_CONFIG
+    from src.config import MASTER_CONFIG
+    AGENT_CONFIG = MASTER_CONFIG['core_agent']
     from src.networks.neural_network_factory import get_neural_network_functions
     from src.networks.neural_network import AlphaZeroNetwork  # Still need the class for type checking
     

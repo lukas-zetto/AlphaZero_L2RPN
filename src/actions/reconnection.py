@@ -24,28 +24,54 @@ Strategy:
 """
 from typing import List, Tuple, Optional
 import numpy as np
-from grid2op.Agent import RecoPowerlineAgent
+from grid2op.Agent import RecoPowerlineAgent, BaseAgent
+from grid2op.Action import ActionSpace
+from abc import abstractmethod
 
-# Try to import module wrappers
-try:
-    from grid2op.Agent import BaseModule
-    HAS_MODULES = True
-except ImportError:
-    HAS_MODULES = False
 
-if HAS_MODULES:
-    class RecoPowerlineModule(BaseModule, RecoPowerlineAgent):
-        """Module wrapper for RecoPowerlineAgent for line reconnections."""
-        def __init__(self, action_space):
-            RecoPowerlineAgent.__init__(self, action_space)
-            BaseModule.__init__(self, action_space)
-            
-        def get_act(self, observation, base_action=None, reward=0.0):
-            """Standardized interface for getting reconnection action."""
-            return self.act(observation, reward, done=False)
-else:
-    # Fallback if modules not available
-    RecoPowerlineModule = RecoPowerlineAgent
+# Copyright (c) 2023-2024 La Javaness (https://lajavaness.com)
+# See AUTHORS.txt
+# This Source Code Form is subject to the terms of the Mozilla Public License, version 2.0.
+# If a copy of the Mozilla Public License, version 2.0 was not distributed with this file,
+# you can obtain one at http://mozilla.org/MPL/2.0/.
+# SPDX-License-Identifier: MPL-2.0
+# This file is part of L2RPN 2023 LJN Agent, a repository for the winning agent of L2RPN 2023 competition. It is a submodule contribution to the L2RPN Baselines repository.
+
+class BaseModule(BaseAgent):
+    """This class is a wrapper for grid2op BaseAgent. It is renamed as Module to be included in
+    agents with complex architecture involving hierarchical decision making with heuristic,
+    optimization and neural-network policies. Module can be used as standalone agent or within
+    a modular architecture.
+
+    Parameters
+    ----------
+    BaseAgent :
+        Core agent class from grid2op simulator.
+    """
+
+    def __init__(self, action_space: ActionSpace, action_type: str = None):
+        BaseAgent.__init__(self, action_space=action_space)
+        self.module_type = None
+        self.action_type = action_type
+
+    @abstractmethod
+    def get_act(self, observation, base_action, reward, done=False):
+        pass
+
+
+class RecoPowerlineModule(BaseModule, RecoPowerlineAgent):
+    """Module wrapper for the greedy RecoPowerlineAgent from Grid2Op.
+    This module will try to best reconnection possible at each time step.
+    """
+
+    def __init__(self, action_space: ActionSpace):
+        BaseModule.__init__(self, action_space, action_type="reconnection")
+        RecoPowerlineAgent.__init__(self, action_space)
+
+    def get_act(self, observation, base_action, reward, done=False):
+        """Standardized interface for getting a reconnection action."""
+        return self.act(observation, reward, done)
+
 import numpy as np
 
 

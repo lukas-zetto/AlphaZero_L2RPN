@@ -14,6 +14,7 @@ from lightsim2grid import LightSimBackend
 import numpy as np
 import torch
 import os
+import copy
 from collections import deque
 import multiprocessing as mp
 import warnings
@@ -21,7 +22,8 @@ import traceback
 
 from actions.action_catalog import build_action_catalog
 from training.alphazero_mcts_v2 import run_mcts, select_action, MCTSNodeV2, collect_all_tree_nodes, compute_heuristic_value
-from networks.neural_network import create_neural_network, encode_observation, encode_observation_simple, neural_network_forward, train_neural_network, get_observation_size
+from networks.neural_network_factory import get_neural_network_functions
+from networks.neural_network import encode_observation, encode_observation_simple, get_observation_size
 
 # Suppress warnings in parallel workers
 warnings.filterwarnings("ignore")
@@ -37,49 +39,123 @@ def _parallel_episode_worker(args):
     chronic_id, episode_id, config, worker_id = args
     
     try:
-        # Re-import in worker process
+        # Comprehensive warnings suppression for this worker process
+        import warnings
+        import os
+        import sys
+        
+        # Apply all suppression settings FIRST
+        warnings.filterwarnings("ignore")
+        warnings.filterwarnings("ignore", category=UserWarning)
+        warnings.filterwarnings("ignore", category=FutureWarning)
+        warnings.filterwarnings("ignore", category=DeprecationWarning)
+        warnings.filterwarnings("ignore", message=".*numba.*")
+        warnings.filterwarnings("ignore", message=".*pkg_resources.*")
+        
+        # Set environment variables to suppress numba warnings
+        os.environ['NUMBA_DISABLE_PERFORMANCE_WARNINGS'] = '1'
+        os.environ['PYTHONWARNINGS'] = 'ignore'
+        
+        # Monkey-patch warnings.warn to completely suppress output
+        def silent_warn(*args, **kwargs):
+            pass
+        warnings.warn = silent_warn
+        
+        # Suppress stdout/stderr for imports that still show warnings 
+        from io import StringIO
+        old_stderr = sys.stderr
+        old_stdout = sys.stdout
+        sys.stderr = StringIO()
+        sys.stdout = StringIO()
+        
+        # Re-import in worker process (with stderr suppressed)
         import grid2op
         from lightsim2grid import LightSimBackend
         from grid2op.Parameters import Parameters
         from actions.action_catalog import build_action_catalog
         from training.alphazero_mcts_v2 import run_mcts, select_action
-        from networks.neural_network import create_neural_network, encode_observation, encode_observation_simple, neural_network_forward
+        from networks.neural_network_factory import get_neural_network_functions
+        from networks.neural_network import encode_observation, encode_observation_simple
         
-        # Create environment
+        # Restore stderr and stdout after imports
+        sys.stderr = old_stderr
+        sys.stdout = old_stdout
+        
+        # Create environment with reward class support (parallel worker)
         params = Parameters()
         params.NO_OVERFLOW_DISCONNECTION = False
-        env = grid2op.make(
-            "l2rpn_case14_sandbox",
-            backend=LightSimBackend(),
-            param=params
-        )
+        
+        # Get reward class from config (passed from main process)
+        reward_class_name = config.get('environment', {}).get('reward_class', None)
+        reward_class = None
+        
+        if reward_class_name:
+            match reward_class_name:
+                case 'AlphaZero':
+                    from src.rewards.alphazero_reward import AlphaZeroReward
+                    reward_class = AlphaZeroReward
+                case 'D3QN-2022':
+                    from src.rewards.d3qn_reward import D3QNSurvivalReward
+                    reward_class = D3QNSurvivalReward
+                case 'D3QN-2020':
+                    from src.rewards.d3qn_2020_reward import D3QN2020Reward
+                    reward_class = D3QN2020Reward
+                case 'Loss':
+                    from src.rewards.loss_reward import LossReward
+                    reward_class = LossReward
+                case 'MaxRho':
+                    from src.rewards.maxrho_reward import MaxRhoReward
+                    reward_class = MaxRhoReward
+                case 'PPO':
+                    from src.rewards.ppo_reward import PPO_Reward
+                    reward_class = PPO_Reward
+                case 'LinesCapacity':
+                    from src.rewards.linescapacity_reward import LinesCapacityReward
+                    reward_class = LinesCapacityReward
+                case _:
+                    reward_class = None
+        
+        # Create environment with optional reward class
+        env_kwargs = {
+            "backend": LightSimBackend(),
+            "param": params
+        }
+        if reward_class is not None:
+            env_kwargs["reward_class"] = reward_class
+            
+        env = grid2op.make("l2rpn_case14_sandbox", **env_kwargs)
         
         # Build action catalog
         from config import ACTIONS_CONFIG, USE_REDUCED_ACTION_SPACE, REDUCED_ACTIONS
+        
         full_catalog = build_action_catalog(
             env,
             substations=ACTIONS_CONFIG['substations'],
-            reduction=ACTIONS_CONFIG['reduction'],
+            reduction=config.get('reduction', ACTIONS_CONFIG['reduction']),  # Use config from main process (includes env vars)
             drop_identity=ACTIONS_CONFIG['drop_identity'],
             include_do_nothing=ACTIONS_CONFIG.get('include_do_nothing', True)
         )
         
         # Apply reduced action space if enabled
-        if USE_REDUCED_ACTION_SPACE:
+        use_reduced_action_space = config.get('use_reduced_action_space', USE_REDUCED_ACTION_SPACE)
+        if use_reduced_action_space:
             from dataclasses import replace
             reduced_actions = [full_catalog.actions[idx] for idx in REDUCED_ACTIONS if idx < len(full_catalog.actions)]
             catalog = replace(full_catalog, actions=reduced_actions)
         else:
             catalog = full_catalog
-        
+            
         # Create neural network and load shared weights
         # Dynamically determine input size from environment
         dummy_obs = env.reset()
         from networks.neural_network import encode_observation, get_observation_size
         # Use new unified size calculation
-        input_size = get_observation_size(env_copy, config)
+        input_size = get_observation_size(env, config)
         num_actions = len(catalog.actions)
-        print(f"🔍 WORKER {worker_id}: Dynamic input_size={input_size}, num_actions={num_actions}")
+        # Workers run silently - no verbose output
+        
+        # Get neural network functions based on config
+        nn_funcs = get_neural_network_functions(config)
         
         # Import torch for state dict loading
         import torch
@@ -92,205 +168,104 @@ def _parallel_episode_worker(args):
         old_stdout = sys.stdout
         sys.stdout = StringIO()
         
-        neural_network = create_neural_network(input_size=input_size, num_actions=num_actions, config=config)
+        neural_network = nn_funcs.create_neural_network(input_size=input_size, num_actions=num_actions, config=config)
         
         # Restore stdout
         sys.stdout = old_stdout
         
-        # DISABLED: Don't load any network weights - use fresh random initialization
-        # Each worker starts with its own random network (pure exploration/heuristic mode)
-        # if 'network_state_dict' in config:
-        #     neural_network.load_state_dict(config['network_state_dict'])
-        #     neural_network.eval()  # Set to evaluation mode for inference
+        # ENABLE: Load shared network weights from main training process
+        if 'network_state_dict' in config:
+            neural_network.load_state_dict(config['network_state_dict'])
+            neural_network.eval()  # Set to evaluation mode for inference
+            # Workers run silently
+        else:
+            # Workers run silently - use random initialization
+            pass
+        
+        # Create agent instance with full capabilities (same as main training process)
+        from src.agent.my_agent import MyCustomAgent
+        # Temporarily suppress agent output
+        old_stdout = sys.stdout
+        sys.stdout = StringIO()
+        
+        agent = MyCustomAgent(action_space=env.action_space, config=config)
+        agent.set_env(env)  # Set environment reference
+        agent.set_mode('train')  # Workers use training mode (MCTS + reconnections)
+        
+        # Restore stdout
+        sys.stdout = old_stdout
+        
+        # Pass required objects to agent for MCTS
+        agent.neural_network = neural_network  # Use shared weights
+        agent.mcts_config = config  # Full config for MCTS
+        agent.action_catalog_for_mcts = catalog  # Action catalog for MCTS
+        
+        # Get neural network functions for agent
+        nn_funcs = get_neural_network_functions(config)
+        agent.nn_funcs = nn_funcs
+        
+        # Workers run silently - no verbose output
         
         # Set chronic and reset
-        env.set_id(chronic_id)
-        obs = env.reset()
-        
-        # Print worker start (will appear in log)
         print(f"  [Worker {worker_id}] Started: Chronic {chronic_id}", flush=True)
+        try:
+            env.set_id(chronic_id)
+            obs = env.reset()
+        except Exception as e:
+            print(f"  [Worker {worker_id}] Environment setup failed: {e}", flush=True)
+            raise
+        
+        # Workers run silently - no startup messages
         
         done = False
         step = 0
+        reward = 0.0  # Initialize reward for first agent.act() call
         episode_data = []
         max_steps = config['max_episode_steps']
         critical_threshold = config.get('critical_threshold', 0.90)
         
         # Track episode statistics
         max_rho_seen = 0.0
-        overloaded_lines = []
-        actions_taken = []
-        critical_states_count = 0
         cumulative_reward = 0.0
         
         while not done and step < max_steps:
-            max_rho = np.max(obs.rho)
-            is_critical = max_rho > critical_threshold
+            # Check for debug mode without printing
+            is_debug_mode = config.get('debug_fast_training', False)
+            num_samples = len(episode_data)
+
+            if is_debug_mode and num_samples >= 2:
+                print(f"  ⏩ DEBUG: Reached {num_samples} training samples, forcing episode end.")
+                break
+
+            # Use agent for all decision making (handles MCTS in critical states, reconnections in all states)
+            try:
+                action = agent.act(obs, reward, done)
+            except Exception as e:
+                print(f"  [Worker {worker_id}] Step {step}: Agent action failed: {e}", flush=True)
+                raise
             
-            # Track max rho seen
+            # Track basic episode statistics
+            max_rho = np.max(obs.rho)
             if max_rho > max_rho_seen:
                 max_rho_seen = max_rho
-                # Track which lines are overloaded
-                overloaded_lines = [i for i, rho in enumerate(obs.rho) if rho > 1.0]
             
-            if is_critical:
-                critical_states_count += 1
-                
-                # Store state before action
-                rho_before = obs.rho.copy()
-                max_rho_before = np.max(rho_before)
-                overloaded_before = [i for i, rho in enumerate(rho_before) if rho > 1.0]
-                
-                # Run MCTS
-                root, stats = run_mcts(
-                    env,
-                    obs,
-                    catalog,
-                    num_simulations=config['mcts_simulations'],
-                    c_puct=config['c_puct'],
-                    gamma=config['gamma'],
-                    max_depth=config['max_depth'],
-                    epsilon=config.get('mcts_epsilon', 0.0),
-                    policy_fn=None,  # Heuristic mode: uniform priors
-                    value_fn=None,   # Heuristic mode: use heuristic value function
-                    critical_threshold=critical_threshold,
-                    dirichlet_alpha=config.get('dirichlet_alpha', 0.3),
-                    dirichlet_epsilon=config.get('dirichlet_epsilon', 0.25),
-                    penalty_for_failure=config.get('penalty_for_failure', -5.0)
-                )
-                
-                # Track tree depth statistics for this episode
-                if 'tree_depths' not in locals():
-                    tree_depths = []
-                tree_depths.append(stats.get('max_depth', 0))
-                
-                # Select action (based on max_reachable_steps)
-                action_idx = select_action(root, temperature=0, epsilon=0.0)
-                
-                # Get MCTS policy target based on config
-                policy_target_method = config.get('policy_target_method', 'visits')
-                policy_temperature = config.get('policy_temperature', 1.0)
-                
-                if policy_target_method == 'one_hot':
-                    # One-hot: target the selected action (which has best max_reachable_steps)
-                    mcts_policy = np.zeros(num_actions)
-                    mcts_policy[action_idx] = 1.0
-                    
-                elif policy_target_method == 'max_steps':
-                    # Distribution based on max_reachable_steps with temperature sharpening
-                    max_reachable_values = np.array([root.children[i].max_reachable_steps if i in root.children else 0 
-                                         for i in range(num_actions)])
-                    
-                    if max_reachable_values.max() > 0:
-                        if policy_temperature == 0:
-                            # Greedy: one-hot on action with max reachable steps
-                            mcts_policy = np.zeros(num_actions)
-                            mcts_policy[action_idx] = 1.0
-                        else:
-                            # Apply temperature sharpening (lower temp = more peaked toward best action)
-                            # Shift to positive values to avoid issues with negative powers
-                            max_steps_shifted = max_reachable_values + 1  # Add 1 to avoid zero
-                            steps_powered = np.power(max_steps_shifted, 1.0/policy_temperature)
-                            mcts_policy = steps_powered / steps_powered.sum()
-                    else:
-                        # Fallback if no valid actions
-                        mcts_policy = np.zeros(num_actions)
-                        mcts_policy[action_idx] = 1.0
-                        
-                elif policy_target_method == 'visits_with_selection_bias':
-                    # Visit distribution with extra weight on selected action
-                    visits = np.array([root.children[i].visit_count if i in root.children else 0 
-                                      for i in range(num_actions)])
-                    if visits.sum() > 0:
-                        if policy_temperature == 0:
-                            # Greedy: one-hot on selected action
-                            mcts_policy = np.zeros(num_actions)
-                            mcts_policy[action_idx] = 1.0
-                        else:
-                            visits_powered = np.power(visits, 1.0/policy_temperature)
-                            # Add selection bias: boost the actually selected action (but not action 0 - do-nothing)
-                            if action_idx != 0:
-                                selection_bias = config.get('selection_bias_weight', 0.5)
-                                visits_powered[action_idx] *= (1.0 + selection_bias)
-                            mcts_policy = visits_powered / visits_powered.sum()
-                    else:
-                        mcts_policy = np.ones(num_actions) / num_actions
-                        
-                else:  # 'visits' or default
-                    # Visit distribution: traditional AlphaZero (exploration pattern)
-                    visits = np.array([root.children[i].visit_count if i in root.children else 0 
-                                      for i in range(num_actions)])
-                    if visits.sum() > 0:
-                        if policy_temperature == 0:
-                            # Greedy: one-hot on selected action
-                            mcts_policy = np.zeros(num_actions)
-                            mcts_policy[action_idx] = 1.0
-                        else:
-                            # Apply temperature sharpening if specified
-                            visits_powered = np.power(visits, 1.0/policy_temperature)
-                            mcts_policy = visits_powered / visits_powered.sum()
-                    else:
-                        mcts_policy = np.ones(num_actions) / num_actions
-                
-                # Store training example
-                state_vector = encode_observation(obs, self.config, self.env)
-                root_value = root.value()
-                episode_data.append({
-                    'state': state_vector,
-                    'policy': mcts_policy,
-                    'value': root_value,
-                })
-                
-                # Take action
-                action = catalog.actions[action_idx]
-                grid2op_action = action.apply(env.action_space)
-                obs, reward, done, info = env.step(grid2op_action)
-                cumulative_reward += reward
-                step += 1
-                
-                # Track action result
-                rho_after = obs.rho.copy()
-                max_rho_after = np.max(rho_after)
-                overloaded_after = [i for i, rho in enumerate(rho_after) if rho > 1.0]
-                rho_change = max_rho_after - max_rho_before
-                
-                action_desc = catalog.actions[action_idx].description() if hasattr(catalog.actions[action_idx], 'description') else f"Action {action_idx}"
-                actions_taken.append({
-                    'step': step,
-                    'action_idx': action_idx,
-                    'action_desc': action_desc,
-                    'rho_before': max_rho_before,
-                    'rho_after': max_rho_after,
-                    'rho_change': rho_change,
-                    'overloaded_before': overloaded_before,
-                    'overloaded_after': overloaded_after
-                })
-            else:
-                # Safe state - do nothing
-                obs, reward, done, info = env.step(env.action_space())
-                cumulative_reward += reward
-                step += 1
+            # Collect training data from agent if available
+            training_data = getattr(agent, 'last_training_data', None)
+            if training_data:
+                episode_data.extend(training_data)
+            
+            obs, reward, done, info = env.step(action)
+            cumulative_reward += reward
+            step += 1
         
         env.close()
         
-        # Print completion summary with statistics
-        avg_tree_depth = sum(tree_depths) / len(tree_depths) if 'tree_depths' in locals() and tree_depths else 0
-        print(f"  [Worker {worker_id}] Completed: Chronic {chronic_id}", flush=True)
-        print(f"    Steps: {step}, Critical states: {critical_states_count}, Training examples: {len(episode_data)}", flush=True)
-        print(f"    Total reward: {cumulative_reward:.2f}, Max rho: {max_rho_seen:.3f}, Avg tree depth: {avg_tree_depth:.1f}", flush=True)
-        if overloaded_lines:
-            print(f"    Peak overloaded lines (rho>1.0): {overloaded_lines[:5]}" + (" ..." if len(overloaded_lines) > 5 else ""), flush=True)
-        if actions_taken:
-            print(f"    Actions taken: {len(actions_taken)} topology changes", flush=True)
-            # Show ALL actions with detailed info
-            for action_info in actions_taken:
-                a = action_info
-                improvement = "✓" if a['rho_change'] < 0 else "✗"
-                print(f"      Step {a['step']}: Action {a['action_idx']} {improvement} rho {a['rho_before']:.3f} → {a['rho_after']:.3f} ({a['rho_change']:+.3f})", flush=True)
-                if a['overloaded_before'] or a['overloaded_after']:
-                        before_str = f"{len(a['overloaded_before'])} lines" if a['overloaded_before'] else "none"
-                        after_str = f"{len(a['overloaded_after'])} lines" if a['overloaded_after'] else "none"
-                        print(f"        Overloaded: {before_str} → {after_str}", flush=True)
+        # Calculate average tree depth from MCTS runs (proper method)
+        tree_depths = getattr(agent, 'episode_tree_depths', [])
+        avg_depth = np.mean(tree_depths) if tree_depths else 0.0
+        
+        # Print compact completion summary with requested statistics
+        print(f"  [Worker {worker_id}] Completed: Chronic {chronic_id} - {step} steps, {len(episode_data)} samples, avg_depth={avg_depth:.1f}, reward={cumulative_reward:.1f}, max_rho={max_rho_seen:.3f}", flush=True)
         
         return {
             'success': True,
@@ -303,7 +278,10 @@ def _parallel_episode_worker(args):
         }
         
     except Exception as e:
+        print(f"  [Worker {worker_id}] Episode FAILED with exception: {e}", flush=True)
+        import traceback
         error_msg = f"Worker {worker_id} failed: {str(e)}\n{traceback.format_exc()}"
+        print(f"  [Worker {worker_id}] Full error: {error_msg}", flush=True)
         return {
             'success': False,
             'chronic_id': chronic_id,
@@ -323,16 +301,36 @@ class AlphaZeroTrainerV2:
         self.action_catalog = action_catalog
         self.config = config
         self.use_replay_buffer = config.get('use_replay_buffer', True)
+        
+        # Create agent for safe-state action selection
+        from src.agent.my_agent import MyCustomAgent
+        self.agent = MyCustomAgent(action_space=env.action_space, config=config)
+        self.agent.set_env(env)  # Set environment reference for action modules
+        
+        # Set agent to training mode and pass required objects for MCTS
+        self.agent.set_mode('train')
+        self.agent.mcts_config = config
+        self.agent.action_catalog_for_mcts = action_catalog
+        
+        # Get neural network functions based on config
+        self.nn_funcs = get_neural_network_functions(config)
+        self.agent.nn_funcs = self.nn_funcs  # Pass to agent for MCTS
+        
         # Create neural network with dynamic input size
         # Determine input size from actual environment observation using unified method
         self.input_size = get_observation_size(env, config)  # Dynamic based on config and environment
         self.num_actions = len(action_catalog.actions)
         print(f"🔍 TRAINER: Dynamic input_size={self.input_size}, num_actions={self.num_actions}, obs_type={config.get('obs_space_type', 'custom')}")
-        self.neural_network = create_neural_network(
+        print(f"🔍 Using neural network implementation: {config.get('neural_network_implementation', 'default')}")
+        
+        self.neural_network = self.nn_funcs.create_neural_network(
             input_size=self.input_size,
             num_actions=self.num_actions,
             config=config
         )
+        
+        # Share neural network with agent for MCTS
+        self.agent.neural_network = self.neural_network
         
         # Load from checkpoint if model_path is specified
         # DISABLED: Start training from scratch with random initialization
@@ -345,13 +343,16 @@ class AlphaZeroTrainerV2:
         #     state_dict_key = 'model_state_dict' if 'model_state_dict' in checkpoint else 'network_state_dict'
         #     self.neural_network.load_state_dict(checkpoint[state_dict_key])
         #     print(f"✓ Loaded checkpoint from iteration {checkpoint.get('iteration', 'unknown')}")
-        # Create optimizer once (for learning rate decay)
+        # Create optimizer once (for learning rate decay) - only for non-RBM implementations
         self.learning_rate = config['learning_rate']
-        self.optimizer = torch.optim.Adam(
-            self.neural_network.parameters(), 
-            lr=self.learning_rate,
-            weight_decay=config.get('weight_decay', 0.0001)
-        )
+        if config.get('neural_network_implementation') != 'rbm':
+            self.optimizer = torch.optim.Adam(
+                self.neural_network.parameters(), 
+                lr=self.learning_rate,
+                weight_decay=config.get('weight_decay', 0.0001)
+            )
+        else:
+            self.optimizer = None  # RBM doesn't use PyTorch optimizers
         # Learning rate decay params
         self.lr_decay = config.get('learning_rate_decay', 1.0)
         self.min_lr = config.get('min_learning_rate', 0.00001)
@@ -372,26 +373,31 @@ class AlphaZeroTrainerV2:
         total_chronics = len(env.chronics_handler.real_data.subpaths)
         train_test_split = TRAINING_CONFIG.get('train_test_split', 0.9)
         num_test_chronics = TRAINING_CONFIG.get('num_test_chronics', None)
-        chronic_seed = TRAINING_CONFIG.get('chronic_seed', None)
+        chronic_seed = config.get('chronic_seed') or TRAINING_CONFIG.get('chronic_seed', None)
         
-        # Create split: first X% for training pool, remaining for test pool
-        train_pool_size = int(total_chronics * train_test_split)
-        self.train_chronics = list(range(train_pool_size))
-        
-        # Get test pool from remaining chronics
-        test_pool = list(range(train_pool_size, total_chronics))
-        
-        # Use seed for deterministic selection if provided
+        # Create random split: shuffle all chronics first, then split
         import random
+        all_chronics = list(range(total_chronics))
+        
+        # Use seed for deterministic random split if provided
         if chronic_seed is not None:
             random.seed(chronic_seed)
-            
+        
+        # Randomly shuffle all chronics before splitting
+        random.shuffle(all_chronics)
+        
+        train_pool_size = int(total_chronics * train_test_split)
+        self.train_chronics = all_chronics[:train_pool_size]  # First X% after shuffle
+        test_pool = all_chronics[train_pool_size:]  # Remaining chronics after shuffle
+        
         # Select test chronics: either a random subset or all test chronics
         if num_test_chronics is None:
             # Use all chronics from test pool
             self.test_chronics = test_pool
         elif len(test_pool) >= num_test_chronics:
-            # Randomly select subset from test pool
+            # Randomly select subset from test pool (re-seed for consistency)
+            if chronic_seed is not None:
+                random.seed(chronic_seed + 1)  # Different seed for test selection
             self.test_chronics = sorted(random.sample(test_pool, num_test_chronics))
         else:
             # Test pool smaller than requested, use all
@@ -400,16 +406,15 @@ class AlphaZeroTrainerV2:
         
         # Shuffle training chronics to prevent temporal correlation
         if chronic_seed is not None:
-            random.seed(chronic_seed)
+            random.seed(chronic_seed + 2)  # Different seed for training order
         random.shuffle(self.train_chronics)
         
         self.current_chronic_idx = 0  # Index into train_chronics list
         print(f"Created neural network: input={self.input_size}, actions={self.num_actions}")
-        print(f"Chronic selection (seed={chronic_seed}):")
+        print(f"Chronic selection (seed={chronic_seed}) - RANDOM SPLIT:")
         print(f"  Total chronics: {total_chronics}")
-        print(f"  Training pool: 0-{train_pool_size-1} ({train_pool_size} chronics, SHUFFLED)")
-        print(f"  Test pool: {train_pool_size}-{total_chronics-1} ({len(test_pool)} chronics)")
-        print(f"  Test chronics selected: {len(self.test_chronics)} chronics - {self.test_chronics}")
+        print(f"  Training chronics: {len(self.train_chronics)} randomly selected - {sorted(self.train_chronics)}")
+        print(f"  Test chronics selected: {len(self.test_chronics)} chronics - {sorted(self.test_chronics)}")
         print(f"Initial learning rate: {self.learning_rate:.6f}, decay: {self.lr_decay}, min: {self.min_lr:.6f}")
         print(f"Replay buffer: {'ENABLED' if self.use_replay_buffer else 'DISABLED'}, size: {config.get('replay_buffer_size', 0)} episodes")
 
@@ -421,7 +426,7 @@ class AlphaZeroTrainerV2:
             uniform_policy = np.ones(self.num_actions) / self.num_actions
             return uniform_policy, 0.0
         
-        policy, value = neural_network_forward(
+        policy, value = self.nn_funcs.neural_network_forward(
             self.neural_network,
             observation,
             self.num_actions
@@ -462,348 +467,35 @@ class AlphaZeroTrainerV2:
         episode_data = []
         is_failure = False  # Track if episode ended due to failure
         cumulative_reward = 0.0  # Track total episode reward
+        reward = 0.0  # Initialize reward for first step
         
         while not done and step < self.config['max_episode_steps']:
+            # Forceful debug check at every step
+            is_debug_mode = self.config.get('debug_fast_training', False)
+            num_samples = len(episode_data)
+            print(f"  [DEBUG] Step {step}: debug_fast_training={is_debug_mode}, collected_samples={num_samples}")
+
+            if is_debug_mode and num_samples >= 2:
+                print(f"  ⏩ DEBUG: Reached {num_samples} training samples, forcing episode end.")
+                break
             max_rho = np.max(obs.rho)
-            critical_threshold = self.config.get('critical_threshold', 0.90)
+            critical_threshold = self.config.get('core_agent', {}).get('critical_threshold', 0.98)
             is_critical = max_rho > critical_threshold
             
             print(f"\nStep {step}: rho_max={max_rho:.3f} {'🔴 CRITICAL' if is_critical else '🟢 SAFE'} (threshold={critical_threshold})")
             
-            # Only run MCTS if in critical state
-            if not is_critical:
-                # Check if we should reset topology to reference when safe
-                reset_threshold = self.config.get('topology_reset_threshold', 0.90)
-                if max_rho <= reset_threshold:
-                    from actions.topology_reset import get_reference_topology_action
-                    try:
-                        reset_action = get_reference_topology_action(obs, self.env)
-                        # Check if this is actually a reset (not do-nothing)
-                        # For now, just apply it
-                        print(f"  🔄 Grid is very safe (rho={max_rho:.3f} ≤ {reset_threshold}) - resetting to reference topology")
-                        obs, reward, done, info = self.env.step(reset_action)
-                        cumulative_reward += reward
-                    except Exception as e:
-                        print(f"  ⚠️ Topology reset failed: {e}, using do-nothing")
-                        obs, reward, done, info = self.env.step(self.env.action_space())
-                        cumulative_reward += reward
-                else:
-                    print(f"  ⏭️ Skipping MCTS - grid is safe, taking do-nothing action")
-                    # Take do-nothing action
-                    obs, reward, done, info = self.env.step(self.env.action_space())
-                    cumulative_reward += reward
-                step += 1
-                continue
+            # Use agent for all decision making (handles MCTS in critical states, reconnections in all states)
+            action = self.agent.act(obs, reward, done)
             
-            # Run MCTS with neural network (only in critical states)
-            epsilon = self.config.get('mcts_epsilon', 0.0)
-            critical_threshold = self.config.get('critical_threshold', 0.90)
+            # Collect training data from agent if available
+            training_data = getattr(self.agent, 'last_training_data', None)
+            if training_data:
+                episode_data.extend(training_data)
+                print(f"  📦 Collected {len(training_data)} training examples from agent")
             
-            # COMPARISON: What would do-nothing do?
-            do_nothing_failed = False
-            try:
-                do_nothing_action = self.env.action_space()
-                sim_obs, sim_reward, sim_done, sim_info = obs.simulate(do_nothing_action)
-                do_nothing_rho = sim_obs.rho.max()
-                rho_delta = do_nothing_rho - max_rho
-                if sim_done:
-                    print(f"  🚫 Do-nothing would FAIL (rho={do_nothing_rho:.3f})")
-                    do_nothing_failed = True
-                elif rho_delta > 0:
-                    print(f"  ⬆️ Do-nothing would increase rho: {max_rho:.3f} → {do_nothing_rho:.3f} (+{rho_delta:.3f})")
-                elif rho_delta < 0:
-                    print(f"  ⬇️ Do-nothing would decrease rho: {max_rho:.3f} → {do_nothing_rho:.3f} ({rho_delta:.3f})")
-                else:
-                    print(f"  ➡️ Do-nothing would maintain rho: {max_rho:.3f}")
-            except Exception as e:
-                print(f"  ⚠️ Could not simulate do-nothing: {e}")
-                do_nothing_failed = True
-            
-            # Determine value function based on value_target_method
-            value_method = self.config.get('value_target_method', 'mcts_root')
-            if value_method == 'heuristic':
-                # Use heuristic value function during MCTS search
-                from training.alphazero_mcts_v2 import compute_heuristic_value
-                from rewards.custom_reward import MyCustomReward
-                heuristic_reward_fn = MyCustomReward()
-                
-                def heuristic_value_fn(observation):
-                    # Compute actual reward for this observation
-                    actual_reward = heuristic_reward_fn(
-                        action=None,
-                        env=None,
-                        has_error=False,
-                        is_done=False,
-                        is_illegal=False,
-                        is_ambiguous=False,
-                        obs=observation
-                    )
-                    # Create temporary node with actual reward
-                    temp_node = MCTSNodeV2(
-                        env=None, 
-                        observation=observation,
-                        edge_reward=actual_reward  # Use actual reward based on state
-                    )
-                    return compute_heuristic_value(
-                        temp_node,
-                        gamma=self.config.get('gamma', 0.95),
-                        horizon=self.config.get('heuristic_value_horizon', 100)
-                    )
-                value_fn = heuristic_value_fn
-                # Use NN for policy priors (should be ~uniform at initialization)
-                policy_fn = lambda o: self.get_policy_value(o)[0]
-            else:
-                # Use neural network for both policy and value
-                policy_fn = lambda o: self.get_policy_value(o)[0]
-                value_fn = lambda o: self.get_policy_value(o)[1]
-            
-            print(f"  Running MCTS with {self.config['mcts_simulations']} simulations (epsilon={epsilon}, threshold={critical_threshold})...")
-            
-            root, stats = run_mcts(
-                env=self.env,
-                observation=obs,
-                action_catalog=self.action_catalog,
-                num_simulations=self.config['mcts_simulations'],
-                c_puct=self.config['c_puct'],  # Fixed: use 'c_puct' not 'puct_c'
-                gamma=self.config['gamma'],
-                policy_fn=policy_fn,  # NN policy for priors
-                value_fn=value_fn,    # Heuristic or NN value
-                max_depth=self.config['max_depth'],
-                epsilon=epsilon,
-                verbose=True,  # Enable to see pre-filter messages
-                critical_threshold=critical_threshold,
-                t_skipped=self.config.get('t_skipped', 80),  # Use config value or default
-                t_stopping=self.config.get('t_stopping', 30),  # Use config value or default
-                auto_reconnect=self.config.get('auto_reconnect', True),
-                max_reconnections=self.config.get('max_reconnections_per_action', 1),
-                prefilter_rho_increase=self.config.get('action_prefilter_rho_increase', 0.15),
-                dirichlet_alpha=self.config.get('dirichlet_alpha', 0.3),
-                dirichlet_epsilon=self.config.get('dirichlet_epsilon', 0.25),
-                penalty_for_failure=self.config.get('penalty_for_failure', -5.0),
-                enable_debug=enable_debug  # Only show debug in sequential mode
-            )
-            
-            # Print tree statistics for debugging
-            recovery_info = f" ({stats.get('recovery_nodes', 0)} recovery nodes)" if stats.get('recovery_nodes', 0) > 0 else ""
-            early_stop_info = f" - early stopped at {stats.get('simulations_run', 0)}/{self.config['mcts_simulations']}" if stats.get('simulations_run', 0) < self.config['mcts_simulations'] else ""
-            print(f"  MCTS complete: {len(root.children)} root children, max_depth={stats['max_depth']}{recovery_info}{early_stop_info}")
-            print(f"    Tree structure:")
-            for d in range(min(10, stats['max_depth']+1)):  # Show up to depth 10
-                total = stats['nodes_by_depth'].get(d, 0)
-                terminal = stats['terminal_by_depth'].get(d, 0)
-                visits = stats['visits_by_depth'].get(d, 0)
-                print(f"      Depth {d}: {total} nodes ({terminal} terminal, {visits} visits)")
-            
-            # Show root visit distribution and max_reachable_steps
-            if stats['root_children_visits']:
-                visits = [c['visits'] for c in stats['root_children_visits']]
-                values = [c['value'] for c in stats['root_children_visits']]
-                max_steps = [c['max_reachable_steps'] for c in stats['root_children_visits']]
-                print(f"    Root visits: max={max(visits)}, mean={sum(visits)/len(visits):.1f}, >10={sum(1 for v in visits if v > 10)}")
-                print(f"    Root Q-values: max={max(values):.3f}, min={min(values):.3f}, mean={sum(values)/len(values):.3f}")
-                print(f"    Max reachable steps: max={max(max_steps)}, mean={sum(max_steps)/len(max_steps):.1f}")
-                
-                # Show top 3 actions by max_reachable_steps (most important metric!)
-                sorted_children = sorted(stats['root_children_visits'], key=lambda x: x['max_reachable_steps'], reverse=True)[:3]
-                print(f"    Top 3 actions by max_reachable_steps:")
-                for i, child_info in enumerate(sorted_children, 1):
-                    action_idx = child_info['action_idx']
-                    print(f"      {i}. Action {action_idx}: max={child_info['max_reachable_steps']} steps, {child_info['visits']} visits, Q={child_info['value']:.3f}")
-            
-            # Get action probabilities from visit counts
-            visits = np.array([root.children.get(i, MCTSNodeV2(None, None)).visit_count 
-                              for i in range(self.num_actions)])
-            
-            # Normalize to get policy
-            total_visits = visits.sum()
-            if total_visits > 0:
-                mcts_policy = visits / total_visits
-            else:
-                mcts_policy = np.ones(self.num_actions) / self.num_actions
-            
-            # Calculate policy entropy
-            policy_nonzero = mcts_policy[mcts_policy > 0]
-            policy_entropy = -np.sum(policy_nonzero * np.log(policy_nonzero + 1e-10))
-            max_entropy = np.log(self.num_actions)
-            normalized_entropy = policy_entropy / max_entropy
-            print(f"  🎯 Policy entropy: {policy_entropy:.3f} (normalized: {normalized_entropy:.3f})")
-            if normalized_entropy > 0.9:
-                print(f"    ⚠️ Warning: Policy is very uniform (entropy close to max)")
-            
-            # Count terminal children for debugging
-            terminal_actions = sum(1 for child in root.children.values() if child.is_terminal)
-            if terminal_actions > 0:
-                print(f"    ⚠️ Filtered out {terminal_actions} terminal actions (immediate failures)")
-            
-            # Select action using GREEDY selection (best action from MCTS)
-            # Temperature is used only for policy target, not action selection
-            from training.alphazero_mcts_v2 import select_action
-            action_idx = select_action(root, temperature=0, epsilon=0.0)  # Greedy: always pick best action
-            
-            # Get MCTS policy target based on config
-            policy_target_method = self.config.get('policy_target_method', 'visits')
-            # Use decaying temperature for policy target (exploration in training)
-            policy_temperature = self.current_temperature
-            
-            if policy_target_method == 'one_hot':
-                # One-hot: target the selected action (which has best max_reachable_steps)
-                mcts_policy = np.zeros(self.num_actions)
-                mcts_policy[action_idx] = 1.0
-                
-            elif policy_target_method == 'max_steps':
-                # Distribution based on max_reachable_steps with temperature sharpening
-                max_reachable_values = np.array([root.children.get(i, MCTSNodeV2(None, None)).max_reachable_steps 
-                                     for i in range(self.num_actions)])
-                
-                if max_reachable_values.max() > 0:
-                    if policy_temperature == 0:
-                        # Greedy: one-hot on selected action
-                        mcts_policy = np.zeros(self.num_actions)
-                        mcts_policy[action_idx] = 1.0
-                    else:
-                        # Apply temperature sharpening (lower temp = more peaked toward best action)
-                        # Shift to positive values to avoid issues with negative powers
-                        max_steps_shifted = max_reachable_values + 1  # Add 1 to avoid zero
-                        steps_powered = np.power(max_steps_shifted, 1.0/policy_temperature)
-                        mcts_policy = steps_powered / steps_powered.sum()
-                else:
-                    # Fallback if no valid actions
-                    mcts_policy = np.zeros(self.num_actions)
-                    mcts_policy[action_idx] = 1.0
-                    
-            elif policy_target_method == 'visits_with_selection_bias':
-                # Visit distribution with extra weight on selected action
-                if total_visits > 0:
-                    visits_powered = np.power(visits, 1.0/policy_temperature)
-                    # Add selection bias: boost the actually selected action (but not action 0 - do-nothing)
-                    if action_idx != 0:
-                        selection_bias = self.config.get('selection_bias_weight', 0.5)
-                        visits_powered[action_idx] *= (1.0 + selection_bias)
-                    mcts_policy = visits_powered / visits_powered.sum()
-                else:
-                    mcts_policy = np.ones(self.num_actions) / self.num_actions
-                    
-            else:  # 'visits' or default
-                # Visit distribution: already computed above, just apply temperature
-                if total_visits > 0:
-                    if policy_temperature == 0:
-                        # Greedy: one-hot on action with most visits
-                        mcts_policy = np.zeros(self.num_actions)
-                        mcts_policy[action_idx] = 1.0
-                    else:
-                        visits_powered = np.power(visits, 1.0/policy_temperature)
-                        mcts_policy = visits_powered / visits_powered.sum()
-                # else: mcts_policy already set to uniform above
-            
-            if action_idx in root.children:
-                selected_max_steps = root.children[action_idx].max_reachable_steps
-                selected_child = root.children[action_idx]
-                terminal_flag = " [TERMINAL]" if selected_child.is_terminal else ""
-                print(f"  ✅ Selected action {action_idx} (max_steps={selected_max_steps}, visits={visits[action_idx]}{terminal_flag})")
-            else:
-                print(f"  ✅ Selected action {action_idx} (default/fallback)")
-            
-            # Store training examples based on value_target_method
-            value_method = self.config.get('value_target_method', 'mcts_root')
-            
-            if value_method == 'mcts_root':
-                # Original: Use MCTS Q-value from root node only
-                state_vector = encode_observation(obs, self.config, self.env)
-                root_value = root.value()
-                episode_data.append({
-                    'state': state_vector,
-                    'policy': mcts_policy,
-                    'value': root_value,
-                    'source': 'mcts_root'
-                })
-                
-            elif value_method == 'binary_root':
-                # Original: Use binary outcome from root node only (set after episode)
-                state_vector = encode_observation(obs, self.config, self.env)
-                episode_data.append({
-                    'state': state_vector,
-                    'policy': mcts_policy,
-                    'value': 0.0,  # Placeholder - updated after episode
-                    'source': 'binary_root'
-                })
-                
-            elif value_method == 'mcts_all_nodes':
-                # Use MCTS Q-values from ALL tree nodes
-                all_nodes_data = collect_all_tree_nodes(root, lambda obs: encode_observation(obs, self.config, self.env))
-                episode_data.extend(all_nodes_data)
-                print(f"  📦 Collected {len(all_nodes_data)} nodes from MCTS tree (depths 0-{max([d['depth'] for d in all_nodes_data])})")
-                
-            elif value_method == 'binary_all_nodes':
-                # PROPER ALPHAZERO: Collect ALL tree nodes, label with final episode outcome
-                # This is how AlphaZero actually works (Go/Chess/Shogi)
-                all_nodes_data = collect_all_tree_nodes(root, lambda obs: encode_observation(obs, self.config, self.env))
-                # Set placeholder values (will be updated after episode completes)
-                for data in all_nodes_data:
-                    data['value'] = 0.0  # Placeholder
-                    data['source'] = 'binary_all_nodes'
-                episode_data.extend(all_nodes_data)
-                print(f"  📦 Collected {len(all_nodes_data)} nodes from MCTS tree (depths 0-{max([d['depth'] for d in all_nodes_data])}), will label with episode outcome")
-                
-            elif value_method == 'heuristic':
-                # Heuristic mode: Only train policy, not value
-                # Value is computed via heuristic formula, not learned
-                state_vector = encode_observation(obs, self.config, self.env)
-                episode_data.append({
-                    'state': state_vector,
-                    'policy': mcts_policy,
-                    'value': None,  # No value target - we don't train value network
-                    'source': 'heuristic'
-                })
-                print(f"  📦 Collected root for policy training (heuristic mode - no value training)")
-            else:
-                raise ValueError(f"Unknown value_target_method: {value_method}")
-            
-            # Get line loads before action
-            rho_before = obs.rho.copy()
-            top_lines_before = np.argsort(rho_before)[-3:][::-1]
-            
-            # Take action in environment
-            action = self.action_catalog.actions[action_idx]
-            grid2op_action = action.apply(self.env.action_space)
-            
-            print(f"  📋 Action {action_idx}: {str(action)[:80]}")
-            
-            obs, reward, done, info = self.env.step(grid2op_action)
+            obs, reward, done, info = self.env.step(action)
             cumulative_reward += reward
             step += 1
-            
-            # Show line load changes
-            if not done:
-                rho_after = obs.rho.copy()
-                top_lines_after = np.argsort(rho_after)[-3:][::-1]
-                actual_rho_change = rho_after.max() - rho_before.max()
-                
-                print(f"  📉 Line loads:")
-                print(f"    Before (top 3): " + ", ".join([f"L{i}={rho_before[i]:.2f}" for i in top_lines_before]))
-                print(f"    After  (top 3): " + ", ".join([f"L{i}={rho_after[i]:.2f}" for i in top_lines_after]))
-                print(f"    Max change: {actual_rho_change:+.3f}")
-                
-                # Compare with do-nothing (only if do-nothing didn't fail)
-                if 'do_nothing_rho' in locals() and not do_nothing_failed:
-                    do_nothing_change = do_nothing_rho - rho_before.max()
-                    actual_change = rho_after.max() - rho_before.max()
-                    
-                    # For comparison: negative = rho decreased (good), positive = rho increased (bad)
-                    # Better action = more negative change (bigger decrease) or less positive change (smaller increase)
-                    if actual_change < do_nothing_change:
-                        # Actual is more negative (better decrease) or less positive (smaller increase)
-                        improvement = do_nothing_change - actual_change
-                        print(f"    ✅ Better than do-nothing by {improvement:.3f} (do-nothing: {do_nothing_change:+.3f}, actual: {actual_change:+.3f})")
-                    elif actual_change > do_nothing_change:
-                        # Actual is less negative (worse decrease) or more positive (bigger increase)
-                        worse = actual_change - do_nothing_change
-                        print(f"    ❌ WORSE than do-nothing by {worse:.3f} (do-nothing would have changed by {do_nothing_change:+.3f}, actual: {actual_change:+.3f})")
-                    else:
-                        print(f"    ➡️ Same as do-nothing ({actual_change:+.3f})")
-                elif do_nothing_failed:
-                    print(f"    ℹ️ Any action is better than do-nothing (which would fail)")
-
-            
             if done:
                 # Check if episode ended due to failure or natural completion
                 is_failure = (info.get('is_illegal', False) or 
@@ -844,7 +536,8 @@ class AlphaZeroTrainerV2:
             'binary_root': 'Binary outcomes (root only)',
             'mcts_all_nodes': 'MCTS Q-values (all tree nodes)',
             'binary_all_nodes': 'Binary outcomes (all nodes) - PROPER ALPHAZERO',
-            'heuristic': 'Heuristic value function'
+            'heuristic': 'Heuristic value function',
+            'no_guidance': 'Pure MCTS (no neural network guidance)'
         }
         method_name = method_names.get(value_method, value_method)
         
@@ -943,12 +636,20 @@ class AlphaZeroTrainerV2:
             print(f"DEBUG: Training data saving is DISABLED in config")
         
         # Train using the persistent optimizer
-        loss_info = train_neural_network(
-            self.neural_network,
-            training_examples,
-            self.config,
-            optimizer=self.optimizer  # Pass our persistent optimizer
-        )
+        # Check if RBM implementation (doesn't use optimizer parameter)
+        if self.config.get('neural_network_implementation') == 'rbm':
+            loss_info = self.nn_funcs.train_neural_network(
+                self.neural_network,
+                training_examples,
+                self.config
+            )
+        else:
+            loss_info = self.nn_funcs.train_neural_network(
+                self.neural_network,
+                training_examples,
+                self.config,
+                optimizer=self.optimizer  # Pass our persistent optimizer
+            )
         
         # Log value statistics for debugging
         value_targets = [ex['value'] for ex in training_examples if ex['value'] is not None]
@@ -965,6 +666,10 @@ class AlphaZeroTrainerV2:
             print(f"  Value targets - min: {value_min:.3f}, max: {value_max:.3f}, mean: {value_mean:.3f}")
         else:
             print(f"  Value targets - (none, using heuristic mode)")
+        
+        # Update agent's neural network reference after training
+        self.agent.neural_network = self.neural_network
+        
         return loss_info
     
     def _save_training_data_sample(self, iteration, training_examples):
@@ -999,9 +704,10 @@ class AlphaZeroTrainerV2:
         old_lr = self.learning_rate
         self.learning_rate = max(self.min_lr, self.learning_rate * self.lr_decay)
         
-        # Update optimizer learning rate
-        for param_group in self.optimizer.param_groups:
-            param_group['lr'] = self.learning_rate
+        # Update optimizer learning rate (only if optimizer exists)
+        if self.optimizer is not None:
+            for param_group in self.optimizer.param_groups:
+                param_group['lr'] = self.learning_rate
         
         if old_lr != self.learning_rate:
             print(f"📉 Learning rate decayed: {old_lr:.9f} → {self.learning_rate:.9f}")
@@ -1045,7 +751,8 @@ class AlphaZeroTrainerV2:
         for episode in range(num_episodes):
             chronic_id = self.train_chronics[self.current_chronic_idx % len(self.train_chronics)]
             self.current_chronic_idx += 1
-            worker_args.append((chronic_id, episode, worker_config, episode))
+            worker_id = episode % num_workers  # Assign worker ID based on episode index (0-3 for 4 workers)
+            worker_args.append((chronic_id, episode, worker_config, worker_id))
         
         # Run parallel collection
         try:
@@ -1188,10 +895,10 @@ class AlphaZeroTrainerV2:
                 
                 # Save checkpoint after each training update
                 if 'CHECKPOINT_DIR' in os.environ:
-                    checkpoint_dir = f"/workspace/{os.environ['CHECKPOINT_DIR']}"
+                    checkpoint_dir = os.environ['CHECKPOINT_DIR']  # Use absolute path directly
                 else:
                     value_method = self.config.get('value_target_method', 'default')
-                    checkpoint_dir = f"/workspace/checkpoints_{value_method}" if value_method != 'default' else "/workspace/checkpoints"
+                    checkpoint_dir = f"checkpoints_{value_method}" if value_method != 'default' else "checkpoints"
                 checkpoint_path = f"{checkpoint_dir}/alphazero_v2_train{training_iteration}.pt"
                 os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
                 
@@ -1206,11 +913,11 @@ class AlphaZeroTrainerV2:
                     recent_success_rate = 0.0
                     recent_avg_length = 0.0
                 
-                torch.save({
+                # Save checkpoint using the updated save interface
+                checkpoint_data = {
                     'training_iteration': training_iteration,
                     'episodes_collected': episodes_collected,
                     'total_steps': total_steps,  # Total environment interactions
-                    'model_state_dict': self.neural_network.state_dict(),
                     'replay_buffer_size': len(self.replay_buffer),
                     'num_actions': self.num_actions,
                     'input_size': self.input_size,
@@ -1226,6 +933,18 @@ class AlphaZeroTrainerV2:
                         'all_episode_success': self.episode_success,
                         'all_episode_lengths': self.episode_lengths,
                     }
+                }
+                
+                # Save checkpoint with standardized model format + training metadata
+                torch.save({
+                    # Standardized model data (same format as neural_network.save_model)
+                    'model_type': 'alphazero',
+                    'model_state_dict': self.neural_network.state_dict(),
+                    'input_size': self.input_size,
+                    'num_actions': self.num_actions,
+                    'hidden_size': self.config.get('hidden_size', 256),
+                    # Training-specific metadata
+                    **checkpoint_data
                 }, checkpoint_path)
                 print(f"💾 Checkpoint saved: {checkpoint_path}")
                 print(f"   Steps: {total_steps:,} | Avg reward (last {recent_window}): {recent_avg_reward:.2f} | Success rate: {recent_success_rate:.1%}")
@@ -1261,76 +980,36 @@ def main():
     # Parse command-line arguments
     import argparse
     parser = argparse.ArgumentParser(description='Train AlphaZero agent')
-    parser.add_argument('--method', type=str, default='mcts_all_nodes',
-                       choices=['heuristic', 'mcts_root', 'mcts_all_nodes', 'binary_root', 'binary_all_nodes'],
-                       help='Value function method')
+    parser.add_argument('--method', type=str, default=None,
+                       choices=['heuristic', 'mcts_root', 'mcts_all_nodes', 'binary_root', 'binary_all_nodes', 'no_guidance'],
+                       help='Value function method (overrides config)')
+    parser.add_argument('--obs_space_type', type=str, default=None,
+                       choices=['minimal', 'custom', 'gym', 'essential'],
+                       help='Observation space type (overrides config)')
     parser.add_argument('--num_iterations', type=int, default=None,
                        help='Total number of training iterations (overrides calculation)')
     parser.add_argument('--episodes_per_iteration', type=int, default=None,
                        help='Episodes per iteration (overrides config)')
+    parser.add_argument('--main-seed', type=int, default=None,
+                       help='Main seed for training process (overrides hardcoded seed)')
+    parser.add_argument('--chronic-seed', type=int, default=None,
+                       help='Chronic seed for deterministic scenario selection (overrides config)')
     args = parser.parse_args()
     
     # Set random seeds for reproducibility
     import random
-    seed = 42
+    seed = args.main_seed if args.main_seed is not None else 1415  # Default to RUN _8, override via command line
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
     
-    # Setup environment
-    env_name = "l2rpn_case14_sandbox"
-    print(f"Loading environment: {env_name}")
+    print(f"🎲 Using main seed: {seed}")
+    if args.chronic_seed is not None:
+        print(f"🎲 Chronic seed override: {args.chronic_seed}")
     
-    params = Parameters()
-    params.NO_OVERFLOW_DISCONNECTION = False
-    
-    env = grid2op.make(
-        env_name,
-        backend=LightSimBackend(),
-        param=params
-    )
-    
-    # Set Grid2Op seed for deterministic chronics
-    env.seed(seed)
-    
-    # Build action catalog from config
-    from config import ACTIONS_CONFIG, USE_REDUCED_ACTION_SPACE, REDUCED_ACTIONS
-    substations = ACTIONS_CONFIG['substations']
-    reduction = ACTIONS_CONFIG['reduction']
-    drop_identity = ACTIONS_CONFIG['drop_identity']
-    include_do_nothing = ACTIONS_CONFIG.get('include_do_nothing', True)
-    
-    print(f"Building action catalog: substations={substations}, reduction={reduction}, drop_identity={drop_identity}, include_do_nothing={include_do_nothing}")
-    full_catalog = build_action_catalog(env, substations=substations, reduction=reduction, 
-                                   drop_identity=drop_identity, include_do_nothing=include_do_nothing)
-    
-    # Apply reduced action space if enabled
-    if USE_REDUCED_ACTION_SPACE:
-        from dataclasses import replace
-        reduced_actions = [full_catalog.actions[idx] for idx in REDUCED_ACTIONS if idx < len(full_catalog.actions)]
-        catalog = replace(full_catalog, actions=reduced_actions)
-        print(f"🎯 Using REDUCED action space: {len(catalog.actions)} actions (indices: {REDUCED_ACTIONS})")
-    else:
-        catalog = full_catalog
-        print(f"Action catalog: {len(catalog.actions)} actions")
-    
-    if include_do_nothing:
-        print(f"  Action 0: do-nothing (explicit)")
-        print(f"  Actions 1-{len(catalog.actions)-1}: topology changes")
-    
-    # Load training configuration from config.py
-    from config import AGENT_CONFIG, TRAINING_CONFIG
-    
-    # Override episodes_per_iteration from command-line if provided
-    if args.episodes_per_iteration is not None:
-        AGENT_CONFIG['episodes_per_iteration'] = args.episodes_per_iteration
-    
-    # Override value_function_method from command-line
-    AGENT_CONFIG['value_function_method'] = args.method
-    
-    # Override config with environment variables (for Optuna trials or comparison)
+    # Helper function to get config values from environment variables
     def get_config_value(key, default):
         """Get config value from environment variable or default"""
         # Check both OPTUNA_ and direct env var names
@@ -1340,8 +1019,12 @@ def main():
         value = None
         if env_key_optuna in os.environ:
             value = os.environ[env_key_optuna]
+            print(f"🔧 DEBUG: Found {env_key_optuna} = {value}")
         elif env_key_direct in os.environ:
             value = os.environ[env_key_direct]
+            print(f"🔧 DEBUG: Found {env_key_direct} = {value}")
+        else:
+            print(f"🔧 DEBUG: Environment variable {key.upper()} not found, using default: {default}")
         
         if value is not None:
             # Parse value type
@@ -1350,12 +1033,100 @@ def main():
             try:
                 # Try int first, then float
                 if '.' not in value:
-                    return int(value)
-                return float(value)
+                    parsed = int(value)
+                    print(f"🔧 DEBUG: Parsed {key} as int: {parsed}")
+                    return parsed
+                parsed = float(value)
+                print(f"🔧 DEBUG: Parsed {key} as float: {parsed}")
+                return parsed
             except ValueError:
+                print(f"🔧 DEBUG: Parsed {key} as string: {value}")
                 return value  # Return as string
         return default
     
+    # Setup environment with reward class support
+    env_name = "l2rpn_case14_sandbox"
+    print(f"Loading environment: {env_name}")
+    
+    # Import custom reward class based on environment variable
+    reward_class = None
+    reward_class_name = get_config_value('reward_class', 'AlphaZero')
+    
+    if reward_class_name:
+        match reward_class_name:
+            case 'AlphaZero':
+                from src.rewards.alphazero_reward import AlphaZeroReward
+                reward_class = AlphaZeroReward
+            case 'D3QN-2022':
+                from src.rewards.d3qn_reward import D3QNSurvivalReward
+                reward_class = D3QNSurvivalReward
+            case 'D3QN-2020':
+                from src.rewards.d3qn_2020_reward import D3QN2020Reward
+                reward_class = D3QN2020Reward
+            case 'Loss':
+                from src.rewards.loss_reward import LossReward
+                reward_class = LossReward
+            case 'MaxRho':
+                from src.rewards.maxrho_reward import MaxRhoReward
+                reward_class = MaxRhoReward
+            case 'PPO':
+                from src.rewards.ppo_reward import PPO_Reward
+                reward_class = PPO_Reward
+            case 'LinesCapacity':
+                from src.rewards.linescapacity_reward import LinesCapacityReward
+                reward_class = LinesCapacityReward
+            case _:
+                reward_class = None
+        print(f"🎯 Using reward class: {reward_class_name} -> {reward_class}")
+        
+        # Verify reward class has proper identification
+        if reward_class is not None:
+            temp_reward = reward_class()
+            if hasattr(temp_reward, 'REWARD_ID'):
+                print(f"🔍 REWARD VERIFICATION: ID={temp_reward.REWARD_ID}")
+            else:
+                print(f"⚠️  REWARD WARNING: {reward_class.__name__} missing REWARD_ID verification")
+    
+    params = Parameters()
+    params.NO_OVERFLOW_DISCONNECTION = False
+    
+    # Create environment with optional reward class
+    env_kwargs = {
+        "backend": LightSimBackend(),
+        "param": params
+    }
+    if reward_class is not None:
+        env_kwargs["reward_class"] = reward_class
+        
+    env = grid2op.make(env_name, **env_kwargs)
+    
+    # Set Grid2Op seed for deterministic chronics
+    env.seed(seed)
+    
+    # Load training configuration from config.py
+    from config import AGENT_CONFIG, TRAINING_CONFIG, MASTER_CONFIG
+    from config import ACTIONS_CONFIG, USE_REDUCED_ACTION_SPACE, REDUCED_ACTIONS
+    
+    # Override episodes_per_iteration from command-line if provided
+    if args.episodes_per_iteration is not None:
+        AGENT_CONFIG['episodes_per_iteration'] = args.episodes_per_iteration
+    
+    # Override value_target_method from command-line if provided
+    if args.method is not None:
+        AGENT_CONFIG['value_target_method'] = args.method
+    
+    # Override obs_space_type from command-line if provided
+    if args.obs_space_type is not None:
+        AGENT_CONFIG['obs_space_type'] = args.obs_space_type
+    
+    # Create config dictionary using environment variables
+    actions_config = copy.deepcopy(MASTER_CONFIG['actions'])
+    actions_config.setdefault('topology_reset_module', {})
+    actions_config['topology_reset_module']['safety_threshold'] = get_config_value(
+        'topology_reset_threshold',
+        actions_config['topology_reset_module'].get('safety_threshold', 0.75)
+    )
+
     config = {
         # MCTS parameters from config.py (can be overridden by env vars)
         'mcts_simulations': get_config_value('mcts_simulations', AGENT_CONFIG['mcts_simulations']),
@@ -1396,6 +1167,7 @@ def main():
         'episodes_per_iteration': get_config_value('episodes_per_iteration', AGENT_CONFIG['episodes_per_iteration']),
         'parallel_workers': get_config_value('parallel_workers', AGENT_CONFIG.get('parallel_workers', 0)),
         'max_episode_steps': TRAINING_CONFIG.get('max_steps_per_episode', 10000) or 10000,
+        'debug_fast_training': TRAINING_CONFIG.get('debug_fast_training', False),  # Add debug flag from TRAINING_CONFIG
         'replay_buffer_size': get_config_value('replay_buffer_size', AGENT_CONFIG.get('replay_buffer_size', 100)),
         'replay_buffer_min_size': get_config_value('replay_buffer_min_size', AGENT_CONFIG.get('replay_buffer_min_size', 903)),
         'train_every': get_config_value('train_every', AGENT_CONFIG.get('train_every', 300)),
@@ -1406,6 +1178,9 @@ def main():
         'min_learning_rate': AGENT_CONFIG['min_learning_rate'],
         'weight_decay': AGENT_CONFIG['weight_decay'],
         'training_epochs': get_config_value('training_epochs', AGENT_CONFIG['training_epochs']),
+        
+        # Cycles and iterations
+        'num_cycles': get_config_value('num_cycles', AGENT_CONFIG.get('num_cycles', 50)),
         
         # Topology reset parameters (ADD THIS!)
         'topology_reset_threshold': get_config_value('topology_reset_threshold', AGENT_CONFIG.get('topology_reset_threshold', 0.90)),
@@ -1421,7 +1196,40 @@ def main():
         
         # Neural network architecture
         'hidden_size': AGENT_CONFIG['hidden_size'],  # Use singular to match network code
+        'neural_network_implementation': AGENT_CONFIG.get('neural_network_implementation', 'v1'),  # Add neural network implementation key
+        
+        # RBM-specific parameters
+        'rbm_num_hidden_units': AGENT_CONFIG.get('rbm_num_hidden_units', 64),
+        'rbm_disc_steps': AGENT_CONFIG.get('rbm_disc_steps', 8),
+        'rbm_epochs': AGENT_CONFIG.get('rbm_epochs', 5),
+        'rbm_regularization': AGENT_CONFIG.get('rbm_regularization', 'weak'),
+        'rbm_outer_epochs': AGENT_CONFIG.get('rbm_outer_epochs', 5),
+        'max_actions': 100,  # Will be updated after catalog creation
+        
         'dropout': 0.0,
+        
+        # CRITICAL: Missing parameters that broke all experiments
+        'obs_space_type': get_config_value('obs_space_type', AGENT_CONFIG.get('obs_space_type', 'custom')),
+        
+        # Action space parameters (for action space experiments)  
+        'reduction': get_config_value('reduction', ACTIONS_CONFIG.get('reduction', 'N0')),
+        'use_reduced_action_space': get_config_value('use_reduced_action_space', USE_REDUCED_ACTION_SPACE),
+        
+        # Safety parameters (for safety experiments)
+        't_skipped': get_config_value('t_skipped', AGENT_CONFIG.get('t_skipped', 4)),
+        't_stopping': get_config_value('t_stopping', AGENT_CONFIG.get('t_stopping', 2)),
+        
+        # Add actions configuration for agent compatibility
+        'actions': actions_config,
+        'core_agent': MASTER_CONFIG['core_agent'],
+        
+        # CRITICAL: Environment configuration for MCTS reward functions
+        'environment': {
+            'reward_class': get_config_value('reward_class', 'AlphaZero')
+        },
+        
+        # Command line argument overrides
+        'chronic_seed': args.chronic_seed,  # Add chronic seed from command line args
     }
     
     print(f"\nTraining configuration:")
@@ -1432,16 +1240,50 @@ def main():
     print(f"  Learning rate: {config['learning_rate']}")
     print()
     
+    # Build action catalog using processed config (includes environment variables)
+    substations = ACTIONS_CONFIG['substations']
+    reduction = config['reduction']  # Use processed config (includes env vars)
+    drop_identity = ACTIONS_CONFIG['drop_identity']
+    use_reduced_action_space = config['use_reduced_action_space']  # Use processed config
+    include_do_nothing = ACTIONS_CONFIG.get('include_do_nothing', True)
+    
+    print(f"Building action catalog: substations={substations}, reduction={reduction}, drop_identity={drop_identity}, include_do_nothing={include_do_nothing}")
+    print(f"🔧 Using action reduction: {reduction} (from environment variables)")
+    full_catalog = build_action_catalog(env, substations=substations, reduction=reduction, 
+                                   drop_identity=drop_identity, include_do_nothing=include_do_nothing)
+    
+    # Apply reduced action space if enabled
+    if use_reduced_action_space:
+        from dataclasses import replace
+        reduced_actions = [full_catalog.actions[idx] for idx in REDUCED_ACTIONS if idx < len(full_catalog.actions)]
+        catalog = replace(full_catalog, actions=reduced_actions)
+        print(f"🎯 Using REDUCED action space: {len(catalog.actions)} actions (indices: {REDUCED_ACTIONS})")
+    else:
+        catalog = full_catalog
+        print(f"Action catalog: {len(catalog.actions)} actions")
+    
+    if include_do_nothing:
+        print(f"  Action 0: do-nothing (explicit)")
+        print(f"  Actions 1-{len(catalog.actions)-1}: topology changes")
+    
+    # Update config with actual catalog size for RBM networks
+    config['max_actions'] = len(catalog.actions)
+    
     # Create trainer
     trainer = AlphaZeroTrainerV2(env, catalog, config)
     
     # Run training
-    num_cycles = get_config_value('num_cycles', AGENT_CONFIG.get('num_cycles', 50))
-    episodes_per_iteration = AGENT_CONFIG.get('episodes_per_iteration', 2)
+    num_cycles = config['num_cycles']  # Use config dict (already processed env vars)
+    episodes_per_iteration = config['episodes_per_iteration']  # Use config dict that has env vars
     
     # Calculate total iterations: (num_cycles * train_chronics) / episodes_per_iteration
     num_train_chronics = len(trainer.train_chronics)
     total_iterations = (num_cycles * num_train_chronics) // episodes_per_iteration
+    
+    # Override for debug mode
+    if config.get('debug_fast_training', False):
+        print("🔧 DEBUG MODE: Overriding total_iterations to 1")
+        total_iterations = 1
     
     # Override with command-line argument if provided
     if args.num_iterations is not None:

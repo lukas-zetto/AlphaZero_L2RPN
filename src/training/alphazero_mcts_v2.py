@@ -12,10 +12,9 @@ from typing import List, Dict, Any, Tuple, Optional, Callable
 from collections import defaultdict
 import sys
 sys.path.append('/workspace/src')
-from rewards.custom_reward import MyCustomReward
 
-# Initialize reward function
-custom_reward_fn = MyCustomReward()
+# Reward function will be initialized based on config
+custom_reward_fn = None
 
 
 class MCTSNodeV2:
@@ -381,12 +380,11 @@ def expand_node(node: MCTSNodeV2, action_catalog, action_idx: int,
             test_obs = env_copy.get_obs()
         except Exception as e:
             # Environment copy is in terminal/invalid state
-            if enable_debug:
-                print(f"[DEBUG] env.copy() returned terminal environment:")
-                print(f"  Error: {type(e).__name__}: {e}")
-                print(f"  Parent node.is_terminal: {node.is_terminal}")
-                print(f"  Parent node.env is not None: {node.env is not None}")
-                print(f"  This suggests parent env is in terminal state but is_terminal=False")
+            print(f"[DEBUG] env.copy() returned terminal environment:")
+            print(f"  Error: {type(e).__name__}: {e}")
+            print(f"  Parent node.is_terminal: {node.is_terminal}")
+            print(f"  Parent node.env is not None: {node.env is not None}")
+            print(f"  This suggests parent env is in terminal state but is_terminal=False")
             child = MCTSNodeV2(
                 env=None,
                 observation=None,
@@ -737,6 +735,7 @@ def run_simulation(root: MCTSNodeV2, action_catalog, c_puct: float = 1.0,
                 print(f"      → Descending to action {action_idx} (depth {depth} → {depth+1}, rho={child_rho:.3f})")
             node = node.children[action_idx]
             depth += 1
+
     
     # === 2. EXPANSION ===
     # If we stopped at an unexpanded action, expand it
@@ -757,7 +756,7 @@ def run_simulation(root: MCTSNodeV2, action_catalog, c_puct: float = 1.0,
     value = evaluate_node(node, value_fn)
     
     # Debug logging for tracked paths
-    if len(path_actions) > 0 and debug_action is not None and enable_debug:
+    if len(path_actions) > 0 and debug_action is not None:
         print(f"    [DEBUG] Path through action {debug_action}:")
         print(f"      Actions: {path_actions}")
         print(f"      Rewards: {[f'{r:.3f}' for r in path_rewards]}")
@@ -787,7 +786,7 @@ def run_mcts(env, observation, action_catalog, num_simulations: int,
              depth_bonus: float = 0.0,
              virtual_loss_weight: float = 0.0,
              penalty_for_failure: float = -5.0,
-             enable_debug: bool = False) -> Tuple[MCTSNodeV2, Dict]:
+             config: Dict = None) -> Tuple[MCTSNodeV2, Dict]:
     """
     Run MCTS from current state with safe state skipping.
     
@@ -822,6 +821,24 @@ def run_mcts(env, observation, action_catalog, num_simulations: int,
     Returns:
         (root_node, stats_dict)
     """
+    # Initialize reward function from config
+    global custom_reward_fn
+    if custom_reward_fn is None and config is not None:
+        try:
+            from rewards.reward_factory import get_reward_class
+            reward_class_name = config.get('environment', {}).get('reward_class', 'AlphaZero')
+            reward_class = get_reward_class(reward_class_name)
+            custom_reward_fn = reward_class()
+        except Exception as e:
+            # Fallback to MyCustomReward if factory fails
+            from rewards.custom_reward import MyCustomReward
+            custom_reward_fn = MyCustomReward()
+            print(f"Warning: Failed to load reward class from config, using MyCustomReward: {e}")
+    elif custom_reward_fn is None:
+        # Fallback if no config provided
+        from rewards.custom_reward import MyCustomReward
+        custom_reward_fn = MyCustomReward()
+    
     # Create root node with environment copy
     root_env = env.copy()
     root = MCTSNodeV2(
@@ -855,22 +872,13 @@ def run_mcts(env, observation, action_catalog, num_simulations: int,
     else:
         root.action_priors = {i: 1.0/n_actions for i in range(n_actions)}
     
-    if enable_debug:
-        print(f"[DEBUG] policy_fn is None: {policy_fn is None}")
-        print(f"[DEBUG] n_actions: {n_actions}, expected uniform prior: {1.0/n_actions}")
-        print(f"[DEBUG] Priors BEFORE Dirichlet: {list(root.action_priors.values())[:10]}")
-    
     # Add Dirichlet noise to root priors for exploration (AlphaZero technique)
     # dirichlet_alpha controls concentration (lower = more uniform noise)
     # dirichlet_epsilon controls mixing weight (higher = more exploration)
-    if enable_debug:
-        print(f"[DEBUG] dirichlet_epsilon = {dirichlet_epsilon}, adding noise = {dirichlet_epsilon > 0}")
     if dirichlet_epsilon > 0:
         noise = np.random.dirichlet([dirichlet_alpha] * n_actions)
         for i in range(n_actions):
             root.action_priors[i] = (1 - dirichlet_epsilon) * root.action_priors[i] + dirichlet_epsilon * noise[i]
-    if enable_debug:
-        print(f"[DEBUG] Sample priors: {list(root.action_priors.values())[:5]}")
     
     # Track recovery nodes for early stopping
     recovery_node_count = 0
@@ -1187,13 +1195,19 @@ def select_action(root: MCTSNodeV2, temperature: float = 1.0, epsilon: float = 0
     
     # If all actions lead to terminal states, always do-nothing (safest option)
     if len(non_terminal_actions) == 0:
-        print("  ⚠️ WARNING: All actions lead to terminal states! Falling back to do-nothing (action 0)")
+        # Only show warning in debug mode to avoid spam
+        import os
+        if os.environ.get('AGENT_DEBUG', 'false').lower() == 'true':
+            print("  ⚠️ WARNING: All actions lead to terminal states! Falling back to do-nothing (action 0)")
         return 0
     
     # Check if all actions' best paths only reach 1 step (all effectively terminal)
     max_reachable = max(child.max_reachable_steps for child in non_terminal_actions.values())
     if max_reachable <= 1:
-        print("  ⚠️ WARNING: All action paths only reach 1 step (grid doomed)! Falling back to do-nothing (action 0)")
+        # Only show warning in debug mode to avoid spam
+        import os
+        if os.environ.get('AGENT_DEBUG', 'false').lower() == 'true':
+            print("  ⚠️ WARNING: All action paths only reach 1 step (grid doomed)! Falling back to do-nothing (action 0)")
         return 0
     
     actions = list(non_terminal_actions.keys())

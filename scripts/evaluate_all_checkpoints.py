@@ -6,6 +6,10 @@ Runs evaluations in parallel (up to 15 at a time).
 
 import os
 import sys
+# Add the same path setup as training script
+sys.path.append('/workspace/src')  # For direct imports like 'from networks.neural_network_factory'
+sys.path.append('/workspace')      # For src-prefixed imports like 'from src.networks.neural_network_factory'
+
 import subprocess
 import json
 import re
@@ -15,7 +19,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 # Add src to path
-sys.path.append('/workspace/src')
+sys.path.append('/work/PdF_L2RPN/AlphaZero_L2RPN/src')
 
 def find_checkpoints(checkpoint_dir):
     """Find all checkpoint files in the directory."""
@@ -35,22 +39,30 @@ def extract_checkpoint_number(checkpoint_path):
         return int(match.group(1))
     return None
 
-def evaluate_checkpoint(checkpoint_path, output_prefix="mcts_root"):
+def evaluate_checkpoint(checkpoint_path, output_prefix="mcts_root", obs_space_type=None):
     """Run evaluation for a single checkpoint and parse results."""
     checkpoint_num = extract_checkpoint_number(checkpoint_path)
     print(f"Evaluating checkpoint {checkpoint_num}: {checkpoint_path.name}")
+    print(f"🔍 DEBUG: Checkpoint path: {checkpoint_path}")
+    print(f"🔍 DEBUG: File exists: {checkpoint_path.exists()}")
+    print(f"🔍 DEBUG: File size: {checkpoint_path.stat().st_size if checkpoint_path.exists() else 'N/A'} bytes")
     
     # Create temporary config with this checkpoint
-    log_file = f"/workspace/logs/eval_checkpoint_{output_prefix}_{checkpoint_num}.log"
+    # Create log subdirectory for this experiment
+    log_subdir = f"/work/PdF_L2RPN/AlphaZero_L2RPN/logs/eval/{output_prefix}"
+    os.makedirs(log_subdir, exist_ok=True)
+    log_file = f"{log_subdir}/eval_checkpoint_{checkpoint_num}.log"
     
     # Run evaluation script with checkpoint path as model_path
     env = os.environ.copy()
     env['MODEL_PATH'] = str(checkpoint_path)
+    if obs_space_type is not None:
+        env['OBS_SPACE_TYPE'] = obs_space_type
     
     try:
         result = subprocess.run(
-            ["python3", "/workspace/scripts/evaluate_agent.py"],
-            cwd="/workspace",
+            ["python3", "/work/PdF_L2RPN/AlphaZero_L2RPN/scripts/evaluate_agent.py"],
+            cwd="/work/PdF_L2RPN/AlphaZero_L2RPN",
             env=env,
             capture_output=True,
             text=True,
@@ -64,6 +76,16 @@ def evaluate_checkpoint(checkpoint_path, output_prefix="mcts_root"):
         
         # Parse output for metrics
         output = result.stdout + result.stderr
+        
+        # Try to extract detailed episode results from log
+        detailed_results = []
+        try:
+            # Look for JSON episode results in the output
+            json_match = re.search(r'EPISODE_RESULTS_JSON:(.*?)END_EPISODE_RESULTS_JSON', output, re.DOTALL)
+            if json_match:
+                detailed_results = json.loads(json_match.group(1))
+        except (json.JSONDecodeError, AttributeError):
+            pass
         
         # Extract metrics using regex
         avg_reward = None
@@ -122,6 +144,7 @@ def evaluate_checkpoint(checkpoint_path, output_prefix="mcts_root"):
             'avg_steps': avg_steps,
             'survived_episodes': survived_episodes,
             'total_episodes': total_episodes,
+            'episode_details': detailed_results,  # Add detailed episode results
             'log_file': log_file,
             'success': result.returncode == 0
         }
@@ -135,6 +158,7 @@ def evaluate_checkpoint(checkpoint_path, output_prefix="mcts_root"):
             'avg_steps': None,
             'survived_episodes': None,
             'total_episodes': None,
+            'episode_details': [],  # Empty list for failed evaluations
             'log_file': log_file,
             'success': False,
             'error': 'timeout'
@@ -148,6 +172,7 @@ def evaluate_checkpoint(checkpoint_path, output_prefix="mcts_root"):
             'avg_steps': None,
             'survived_episodes': None,
             'total_episodes': None,
+            'episode_details': [],  # Empty list for failed evaluations
             'log_file': log_file,
             'success': False,
             'error': str(e)
@@ -198,10 +223,10 @@ def parse_metrics_from_log(log_file):
         print(f"Warning: Could not parse metrics from {log_file}: {e}")
     return survival_rate, survived_episodes, avg_steps, total_episodes
 
-def main():
-    checkpoint_dir = "/workspace/checkpoints_heuristic_full_run"
-    output_dir = "/workspace/evaluation_results_full_run"
+def main(checkpoint_dir, output_dir):
     os.makedirs(output_dir, exist_ok=True)
+    # Ensure logs directory exists
+    os.makedirs("/work/PdF_L2RPN/AlphaZero_L2RPN/logs/eval", exist_ok=True)
     results_file = os.path.join(output_dir, "checkpoint_evaluations.json")
 
     # Find all checkpoints
@@ -388,11 +413,13 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--plot-only', action='store_true', help='Only plot from saved results, do not re-evaluate')
+    parser.add_argument('--checkpoint-dir', type=str, default="/work/PdF_L2RPN/AlphaZero_L2RPN/checkpoints_heuristic_whole", help='Directory containing checkpoints')
+    parser.add_argument('--results-dir', type=str, default="/work/PdF_L2RPN/AlphaZero_L2RPN/evaluation_results_heuristic_fresh", help='Directory to save evaluation results')
     args = parser.parse_args()
 
     if args.plot_only:
         # Only plot from saved results
-        output_dir = "/workspace/evaluation_results_full_run"
+        output_dir = args.results_dir
         results_file = os.path.join(output_dir, "checkpoint_evaluations.json")
         if not os.path.exists(results_file):
             print(f"No saved results found at {results_file}")
@@ -513,4 +540,4 @@ if __name__ == "__main__":
             print("No average steps data to plot.")
         sys.exit(0)
 
-    main()
+    main(args.checkpoint_dir, args.results_dir)

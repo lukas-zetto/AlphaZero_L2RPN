@@ -11,7 +11,11 @@ Benefits:
 - Reduces unnecessary complexity when grid is stable
 """
 
+import os
 import numpy as np
+
+# Global debug flag for action modules
+AGENT_DEBUG = os.environ.get('AGENT_DEBUG', 'true').lower() == 'true'
 
 # Try to import module wrappers
 try:
@@ -43,7 +47,8 @@ if HAS_MODULES:
                 "substation", None
             )
             if tested_action is not None:
-                print(f"🔍 Raw topology reset actions found: {len(tested_action)}")
+                if AGENT_DEBUG:
+                    print(f"🔍 Raw topology reset actions found: {len(tested_action)}")
                 tested_action = [
                     act
                     for act in tested_action
@@ -54,10 +59,12 @@ if HAS_MODULES:
                         == 0
                     )
                 ]
-                print(f"🔍 Actions after cooldown filter: {len(tested_action)} available for GreedyModule")
+                if AGENT_DEBUG:
+                    print(f"🔍 Actions after cooldown filter: {len(tested_action)} available for GreedyModule")
                 return tested_action
             else:
-                print("🔍 No topology reset actions found by get_back_to_ref_state")
+                if AGENT_DEBUG:
+                    print("🔍 No topology reset actions found by get_back_to_ref_state")
                 return []
 
         def get_act(self, observation, base_action, reward, done=False, **kwargs):
@@ -65,10 +72,12 @@ if HAS_MODULES:
             tested_actions = self._get_tested_action(observation)
             
             if not tested_actions:
-                print("🔍 No topology reset actions available")
+                if AGENT_DEBUG:
+                    print("🔍 No topology reset actions available")
                 return self.action_space()
             
-            print(f"🔍 GreedyModule simulating {len(tested_actions)} topology reset actions...")
+            if AGENT_DEBUG:
+                print(f"🔍 GreedyModule simulating {len(tested_actions)} topology reset actions...")
             
             # For topology reset, we don't need strict reward optimization
             # Just pick the first action that doesn't cause errors
@@ -77,35 +86,24 @@ if HAS_MODULES:
                     simul_obs, simul_reward, simul_has_error, simul_info = observation.simulate(action + (base_action or self.action_space()))
                     
                     if not simul_has_error and len(simul_info["exception"]) == 0:
-                        print(f"🔍 Topology reset action {i}: rho {observation.rho.max():.3f} -> {simul_obs.rho.max():.3f}, reward={simul_reward:.3f}")
+                        if AGENT_DEBUG:
+                            print(f"🔍 Topology reset action {i}: rho {observation.rho.max():.3f} -> {simul_obs.rho.max():.3f}, reward={simul_reward:.3f}")
                         return action
                     else:
-                        print(f"🔍 Topology reset action {i}: simulation failed - error={simul_has_error}, exceptions={len(simul_info['exception'])}")
+                        if AGENT_DEBUG:
+                            print(f"🔍 Topology reset action {i}: simulation failed - error={simul_has_error}, exceptions={len(simul_info['exception'])}")
                         
                 except Exception as e:
-                    print(f"🔍 Topology reset action {i}: simulation exception - {e}")
+                    if AGENT_DEBUG:
+                        print(f"🔍 Topology reset action {i}: simulation exception - {e}")
                     
             # If all actions failed, return do-nothing
-            print("🔍 All topology reset actions failed - returning do-nothing")
+            if AGENT_DEBUG:
+                print("🔍 All topology reset actions failed - returning do-nothing")
             return self.action_space()
 else:
     # Fallback if modules not available
     RecoverInitTopoModule = None
-
-
-def should_reset_topology(observation, safe_threshold=0.90):
-    """
-    Check if the grid should be reset to reference topology.
-    
-    Args:
-        observation: Grid2Op observation
-        safe_threshold: Maximum rho threshold to consider "safe" (default 0.90)
-    
-    Returns:
-        bool: True if grid is safe enough to reset, False otherwise
-    """
-    max_rho = observation.rho.max()
-    return max_rho <= safe_threshold
 
 
 def create_reset_action(observation, env, method='reco_agent'):
@@ -125,18 +123,23 @@ def create_reset_action(observation, env, method='reco_agent'):
         full_action_space = env.action_space
         if RecoverInitTopoModule is not None:
             reset_agent = RecoverInitTopoModule(full_action_space)
-            print(f"🔍 RecoverInitTopoModule input: rho_max={observation.rho.max():.3f}")
+            if AGENT_DEBUG:
+                print(f"🔍 RecoverInitTopoModule input: rho_max={observation.rho.max():.3f}")
+            
             reset_action = reset_agent.get_act(observation, base_action=None, reward=0.0)
             
             # Handle case where GreedyModule returns None (no beneficial action found)
             if reset_action is None:
-                print(f"🔍 RecoverInitTopoModule: no beneficial reset found, using do-nothing")
+                if AGENT_DEBUG:
+                    print(f"🔍 RecoverInitTopoModule: no beneficial reset found, using do-nothing")
                 reset_action = full_action_space()
             else:
-                print(f"🔍 RecoverInitTopoModule output: action type={type(reset_action)}")
+                if AGENT_DEBUG:
+                    print(f"🔍 RecoverInitTopoModule output: action type={type(reset_action)}")
         else:
             # If RecoverInitTopoModule not available, return do-nothing action
-            print("⚠️ RecoverInitTopoModule not available, skipping topology reset")
+            if AGENT_DEBUG:
+                print("⚠️ RecoverInitTopoModule not available, skipping topology reset")
             reset_action = full_action_space()
         
         # Debug: Show what substation(s) this action affects
@@ -146,15 +149,17 @@ def create_reset_action(observation, env, method='reco_agent'):
                 modified_subs = [i for i, changed in enumerate(topo_impact) 
                                if (np.any(changed) if hasattr(changed, '__len__') else changed)]
                 if modified_subs:
-                    if RecoverInitTopoModule is not None:
-                        print(f"🔄 RecoverInitTopoModule reset affecting substations: {modified_subs}")
-                    else:
-                        print(f"🔄 Manual reset affecting substations: {modified_subs}")
+                    if AGENT_DEBUG:
+                        if RecoverInitTopoModule is not None:
+                            print(f"🔄 RecoverInitTopoModule reset affecting substations: {modified_subs}")
+                        else:
+                            print(f"🔄 Manual reset affecting substations: {modified_subs}")
                 else:
-                    if RecoverInitTopoModule is not None:
-                        print("🔄 RecoverInitTopoModule: no topology changes (do-nothing action)")
-                    else:
-                        print("🔄 Manual reset: no topology changes (do-nothing action)")
+                    if AGENT_DEBUG:
+                        if RecoverInitTopoModule is not None:
+                            print("🔄 RecoverInitTopoModule: no topology changes (do-nothing action)")
+                        else:
+                            print("🔄 Manual reset: no topology changes (do-nothing action)")
             else:
                 # Fallback: check set_bus and line status changes
                 changes = []
@@ -306,7 +311,8 @@ def get_reference_topology_action(observation, env):
     """
     # Try to get reset method from config, default to 'reco_agent'
     try:
-        from src.config import AGENT_CONFIG
+        from src.config import MASTER_CONFIG
+        AGENT_CONFIG = MASTER_CONFIG['core_agent']
         method = AGENT_CONFIG.get('topology_reset_method', 'reco_agent')
     except:
         method = 'reco_agent'  # Default fallback

@@ -15,7 +15,14 @@ import sys
 import os
 sys.path.append('/workspace')
 
-from src.config import AGENT_CONFIG, ENV_CONFIG, ACTIONS_CONFIG, USE_REDUCED_ACTION_SPACE, REDUCED_ACTIONS
+from src.config import MASTER_CONFIG
+
+# Extract configs from unified structure
+AGENT_CONFIG = MASTER_CONFIG['core_agent']
+ENV_CONFIG = MASTER_CONFIG['environment']
+ACTIONS_CONFIG = MASTER_CONFIG['actions']
+USE_REDUCED_ACTION_SPACE = MASTER_CONFIG['actions']['use_reduced_action_space']
+REDUCED_ACTIONS = MASTER_CONFIG['actions']['reduced_actions']
 from scripts.train_alphazero_v2 import AlphaZeroTrainerV2
 from src.actions.action_catalog import build_action_catalog
 import grid2op

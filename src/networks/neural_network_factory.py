@@ -15,6 +15,7 @@ Usage:
 """
 
 from typing import Dict, Any
+import inspect
 
 
 
@@ -30,14 +31,15 @@ def get_neural_network_module(config: Dict[str, Any]):
     """
     implementation = config.get('neural_network_implementation', 'v1')
     
-    if implementation == 'v1':
-        from src.networks import neural_network
-        return neural_network
-    elif implementation == 'rbm':
-        from src.networks import RBM
-        return RBM
-    else:
-        raise ValueError(f"Unknown neural network implementation: {implementation}")
+    try:
+        if implementation == 'v1' or implementation == 'alphazero':
+            from networks import neural_network
+            return neural_network
+        else:
+            raise ValueError(f"Unknown neural network implementation: {implementation}")
+    except Exception as e:
+        # Silent fallback - return None if import fails
+        return None
 
 
 class NeuralNetworkFunctions:
@@ -50,13 +52,50 @@ class NeuralNetworkFunctions:
         """Create neural network using the chosen implementation."""
         return self._module.create_neural_network(input_size, num_actions, config)
     
-    def neural_network_forward(self, neural_network, obs, num_actions: int, mask=None):
+    def neural_network_forward(self, neural_network, obs, num_actions: int, mask=None, config=None, env=None):
         """Forward pass using the chosen implementation."""
-        return self._module.neural_network_forward(neural_network, obs, num_actions, mask=mask)
+        # Use signature inspection to only pass supported parameters
+        sig = inspect.signature(self._module.neural_network_forward)
+        kwargs = {}
+        if 'mask' in sig.parameters and mask is not None:
+            kwargs['mask'] = mask
+        if 'config' in sig.parameters and config is not None:
+            kwargs['config'] = config
+        if 'env' in sig.parameters and env is not None:
+            kwargs['env'] = env
+        return self._module.neural_network_forward(neural_network, obs, num_actions, **kwargs)
     
-    def train_neural_network(self, neural_network, training_examples, config: Dict[str, Any]):
-        """Train neural network using the chosen implementation."""
-        return self._module.train_neural_network(neural_network, training_examples, config)
+    def train_neural_network(self, neural_network, training_examples, config: Dict[str, Any], optimizer=None, **kwargs):
+        """Train neural network using the chosen implementation.
+
+        This method is resilient: it accepts an optional `optimizer` and any
+        extra keyword arguments, and will forward the `optimizer` to the
+        underlying implementation only when supported. If the implementation
+        does not accept an `optimizer` parameter (for example RBM), the
+        optimizer is ignored and the function is called without it.
+        """
+        import inspect
+
+        func = getattr(self._module, 'train_neural_network')
+
+        # Determine optimizer value from explicit arg or kwargs
+        opt_to_pass = optimizer if optimizer is not None else kwargs.get('optimizer', None)
+
+        # Try to inspect the signature of the target function and call appropriately
+        try:
+            sig = inspect.signature(func)
+            if 'optimizer' in sig.parameters:
+                # Call with optimizer as a keyword if supported
+                return func(neural_network, training_examples, config, optimizer=opt_to_pass)
+            else:
+                # Call without optimizer
+                return func(neural_network, training_examples, config)
+        except (ValueError, TypeError):
+            # If we cannot inspect, attempt a best-effort call: try with optimizer, then without
+            try:
+                return func(neural_network, training_examples, config, optimizer=opt_to_pass)
+            except TypeError:
+                return func(neural_network, training_examples, config)
     
     def encode_observation_simple(self, obs):
         """Encode observation using the chosen implementation (legacy method)."""
@@ -96,6 +135,8 @@ def get_neural_network_functions(config: Dict[str, Any]) -> NeuralNetworkFunctio
         network = nn_funcs.create_neural_network(60, 21, config)
     """
     module = get_neural_network_module(config)
+    if module is None:
+        return None
     return NeuralNetworkFunctions(module)
 
 

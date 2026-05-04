@@ -12,7 +12,14 @@ from grid2op.Parameters import Parameters
 # Add parent directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from src.config import AGENT_CONFIG, TRAINING_CONFIG, ACTIONS_CONFIG, USE_REDUCED_ACTION_SPACE, REDUCED_ACTIONS
+from src.config import MASTER_CONFIG
+
+# Extract configs from unified structure
+AGENT_CONFIG = MASTER_CONFIG['core_agent']
+TRAINING_CONFIG = MASTER_CONFIG['training']
+ACTIONS_CONFIG = MASTER_CONFIG['actions']
+USE_REDUCED_ACTION_SPACE = MASTER_CONFIG['actions']['use_reduced_action_space']
+REDUCED_ACTIONS = MASTER_CONFIG['actions']['reduced_actions']
 from src.actions.action_catalog import build_action_catalog
 from src.networks.neural_network import create_neural_network
 from src.training.alphazero_mcts_v2 import run_mcts

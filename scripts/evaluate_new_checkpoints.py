@@ -15,7 +15,10 @@ project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, project_root)
 
 from src.agent.my_agent import MyCustomAgent
-from src.config import AGENT_CONFIG, ENV_CONFIG, EVAL_CONFIG, ACTIONS_CONFIG, TRAINING_CONFIG
+from config import AGENT_CONFIG, ENV_CONFIG, EVAL_CONFIG, ACTIONS_CONFIG, TRAINING_CONFIG
+from config import USE_REDUCED_ACTION_SPACE, REDUCED_ACTIONS
+
+# No additional config extraction needed - using direct imports
 
 
 def get_test_scenarios(env, max_episodes=None):
@@ -166,6 +169,9 @@ def main():
                 action_space=env.action_space,
                 config=full_config
             )
+            
+            # Set agent to test mode for fast inference (no MCTS)
+            agent.set_mode('test')
             
             if os.path.exists(checkpoint_path):
                 print(f"Loading model from: {checkpoint_path}")
