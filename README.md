@@ -105,14 +105,3 @@ enroot start --root --rw --mount $HOME:$HOME dqn_idf_2023 bash -c "
         --experiment horizon_experiments3_fresh
 "
 ```
-
-## Configuration
-
-Key parameters are set via environment variables in the sbatch files and picked up in `src/config.py`:
-
-| Variable | Description |
-|---|---|
-| `HEURISTIC_VALUE_HORIZON` | Lookahead horizon for heuristic value function |
-| `CHECKPOINT_DIR` | Directory to save model checkpoints |
-| `PARALLEL_WORKERS` | Number of parallel simulation workers |
-| `num_cycles` | Number of training cycles |
