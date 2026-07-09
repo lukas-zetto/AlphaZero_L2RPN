@@ -102,6 +102,6 @@ enroot start --root --rw --mount $HOME:$HOME dqn_idf_2023 bash -c "
     python3 scripts/evaluate_all_experiments.py \
         --checkpoints-dir checkpoints \
         --eval-dir eval \
-        --experiment horizon_experiments3_fresh
+        --experiment experiment_folder
 "
 ```
